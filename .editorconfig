@@ -1,0 +1,15 @@
+# https://EditorConfig.org
+
+root = true
+
+[*]
+end_of_line = lf
+charset = utf-8
+
+[*.{ldefs,pspec,cspec}]
+indent_style = space
+indent_size = 2
+
+[*.slaspec]
+indent_style = space
+indent_size = 4
