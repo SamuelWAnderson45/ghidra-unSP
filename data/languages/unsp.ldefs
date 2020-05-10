@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<language_definitions>
+  <language processor="unsp"
+            endian="little"
+            size="16"
+            variant="default"
+            version="1.0"
+            slafile="unsp.sla"
+            processorspec="unsp.pspec"
+            id="unsp:LE:16:default">
+    <description>Sunplus unSP</description>
+    <compiler name="default" spec="unsp.cspec" id="default"/>
+  </language>
+</language_definitions>
