@@ -1008,6 +1008,13 @@ Bank0Mem: "0:"[imm16] is imm16 { export *:2 imm16; }
     opA = imm16;
     setResultFlags(opA);
 }
+:^"pc" = imm16 is (op0=9 & op1=4 & opN=1 & opA=7) ; imm16 {
+	local off:2 = imm16;
+	# inst_start is 8 bit byte, not word offset, need to load PC with word offset
+	local addr:3= ((inst_start >> 1) & 0xff0000) | zext(off);
+    setResultFlags(off);
+    goto [addr];
+}
 :^opA = Bank0Mem is (op0=9 & op1=4 & opN=2 & opA) ; Bank0Mem {
     opA = Bank0Mem;
     setResultFlags(opA);
@@ -1211,6 +1218,14 @@ with : op0=0xe & opE1=2 & opBitFlg=1 {
 # 1111|***|000|100|***
 :^opB = "ds" is op0=0xf & op1=0 & opA!=7 & opN=4 & opB {
     opB = $(ds);
+}
+# 1111|***|000|111|***
+:^"fr" = opB is op0=0xf & op1=0 & opA!=7 & opN=7 & opB {
+    fr = opB;
+}
+# 1111|***|000|110|***
+:^opB = "fr" is op0=0xf & op1=0 & opA!=7 & opN=6 & opB {
+    opB = fr;
 }
 
 # Calls
