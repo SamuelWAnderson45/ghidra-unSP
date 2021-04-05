@@ -22,7 +22,7 @@
     <varnode space="stack" offset="4" size="2"/>
   </returnaddress>
   <default_proto>
-    <prototype name="__cdecl" extrapop="0" stackshift="4">
+    <prototype name="__cdecl" extrapop="2" stackshift="2">
       <input>
         <pentry minsize="1" maxsize="256" align="2">
           <addr offset="6" space="stack"/>
