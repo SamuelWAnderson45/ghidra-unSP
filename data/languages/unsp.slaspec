@@ -138,9 +138,9 @@ opB: opB_r is opB_r { export opB_r; }
 
 macro push(x) {
     local data:2 = x;
-    sp = sp - 1;
-    local stack_addr:3 = segment(0:1, sp + 1);
+    local stack_addr:3 = segment(0:1, sp);
     *:2 stack_addr = data;
+    sp = sp - 1;
 }
 
 macro setResultFlags(reg) {
