@@ -268,20 +268,20 @@ RelN6:   relAddr is opimm [ relAddr=(inst_start & 0x3f0000) + ((inst_next-opimm)
 
 # ALU6
 
-IndirectOp: "0:"[opB] is opN=0 & opB {
+IndirectOp: ""[opB] is opN=0 & opB {
     export *:2 opB;
 } 
-IndirectOp: "0:"[opB--] is opN=1 & opB {
+IndirectOp: ""[opB--] is opN=1 & opB {
     local tmp = opB;
     opB = opB - 1;
     export *:2 tmp;
 } 
-IndirectOp: "0:"[opB++] is opN=2 & opB {
+IndirectOp: ""[opB++] is opN=2 & opB {
     local tmp = opB;
     opB = opB + 1;
     export *:2 tmp;
 } 
-IndirectOp: "0:"[++opB] is opN=3 & opB {
+IndirectOp: ""[++opB] is opN=3 & opB {
     opB = opB + 1;
     export *:2 opB;
 } 
@@ -317,7 +317,7 @@ ALU6BaseDisplacement: ["bp"+opimm] is op1=0 & opimm {
 # ALU with 6bit immediate
 ALU6Opimm: opimm is opimm { local tmp:2 = opimm; export tmp; }
 ALU6Reg: opB is opB { local tmp:2 = opB; export tmp; } 
-ALU6Mem: "0:"[opimm] is opimm { export *:2 opimm; }
+ALU6Mem: ""[opimm] is opimm { export *:2 opimm; }
 ALU6RShift: opB "asr" shift is opShift & opB [ shift = opShift + 1; ] {
     # Save shifted out bits in sb
     local tmp = (opB:1 << 4) | sb;
@@ -368,7 +368,7 @@ ALU6RotShift: opB "ror" shift is opFlag=1 & opShift & opB [ shift = opShift + 1;
 
     export val;
 }
-ALU6DstStack: "0:"["bp"+opimm] is op1=0 & opimm {
+ALU6DstStack: ""["bp"+opimm] is op1=0 & opimm {
     # Stack is always located in Bank 0
     local stack_addr:3 = segment(0:1, bp+opimm);
     export *:2 stack_addr;
@@ -878,7 +878,13 @@ ALU6DstStack: "0:"["bp"+opimm] is op1=0 & opimm {
    IndirectOp = opARead;
 }
 
-StackOpA: "0:"[opARead] is opARead {
+# [0] = r1
+:[opimm] = opARead is op0=0xd & op1=7 & opARead & opimm {
+    local addr:3 = opimm;
+    *:2 addr = opARead;
+}
+
+StackOpA: ""[opARead] is opARead {
     export *:2 opARead;
 }
 DataOpA: "ds:"[opARead] is opARead {
@@ -979,7 +985,7 @@ with : opA_v!=7 {
     }
 }
 
-Bank0Mem: "0:"[imm16] is imm16 { export *:2 imm16; }
+Bank0Mem: ""[imm16] is imm16 { export *:2 imm16; }
 
 # ALU16
 # TODO: this opA_v!=7 isn't true for all cases, should move to specific ALU6Terms after inspection
