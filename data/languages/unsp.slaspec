@@ -14,22 +14,12 @@ define space register type=register_space size=2;
 define register offset=0 size=2     [ sp r1 r2 r3 r4 bp ];
 
 # Status register
-# Bitranges are currently broken in Ghidra
+# We'll only update sr when it's accessed
 define register offset=0xc size=2    [ sr ];
-#define bitrange cs=sr[0,6]
-#                C=sr[6,1]
-#                S=sr[7,1]
-#                Z=sr[8,1]
-#                N=sr[9,1]
-#                ds=sr[10,6];
 
-# cs is not updated correctly. This will likely remain until Sleigh adds composite registers
-@define cs          "sr[0,6]"   # Code segment
-@define C_flag      "sr[6,1]"   # Carry flag
-@define S_flag      "sr[7,1]"   # 
-@define Z_flag      "sr[8,1]"   # Zero flag
-@define N_flag      "sr[9,1]"   # Negative flag 
-@define ds          "sr[10,6]"  # Data segment
+# Status register components
+# Store these discretely, modelling after the ARM SLEIGH spec
+define register offset=0x10 size=1   [ C_flag S_flag Z_flag N_flag ds ];
 
 # Program counter
 # In reality, there is no pc_full, only pc and cs, which is the upper 6 bits of the address
@@ -38,24 +28,44 @@ define register offset=0xc size=2    [ sr ];
 # In order for calls and gotos to work correctly, we use this fake register. Unfortunately,
 # this makes contents of cs incorrect.
 # Until Sleigh adds composite registers (or we find a better solution) this will remain.
-define register offset=0xe size=3    [ pc_full ];
-define register offset=0xe size=2    [ pc ];
+# ---
+# Use pc_full as actual program counter, and pc for pushing to stack
+# Separate them from sr so Ghidra advancing instruction pointer does not affect
+# value of other things
+define register offset=0x15 size=3    [ pc_full ];
+define register offset=0x15 size=2    [ pc ];
+define register offset=0x17 size=1    [ cs ];
 
+# Flag register (since u'nSP 1.2)
 define register offset=0x20 size=2    [ fr ];
-@define irqnest "fr[4,1]"
-@define irq "fr[5,1]"
-@define fiq "fr[6,1]"
-# Holds shifted out bits from shift instructions
-@define sb "fr[7,4]"
-# Movement flag of finite impulse response filter?
-# active low
-@define fir_mov "fr[11,1]"
-@define fraction "fr[12,1]"
-@define sec_bank "fr[13,1]"
+
+# Flag register components
+define register offset=0x30 size=1    [ irqnest irq fiq fir_mov fraction sec_bank aq ];
+define register offset=0x37 size=1    [ pri sb ];
+
+# Second bank (since u'nSP 1.2)
+define register offset=0x40 size=2  [ sr1 sr2 sr3 sr4 ];
+# TODO: hook them up
+
+# u'nSP 1.3-specific registers
+# TODO: hook them up
+define register offset=0x22 size=2  [ ss_full mds ];
+# SS register is only 6 bits, but chances are the storage is 16 bits
+@define ss "ss_full[0,6]"
+
+# Extended registers (u'nSP 2.0)
+define register offset=0x50 size=2 [ r8 r9 r10 r11 r12 r13 r14 r15 ];
+
+# Context for extended instructions
+# See https://github.com/NationalSecurityAgency/ghidra/issues/2365
+#define context contextreg
+#    isExtended=(0,0) # 0:initial, 1:instruction-parse
+#;
 
 define token instr(16)
     op0=(12, 15)
-    opA=(9, 11)
+    opA_r=(9, 11)
+    opA_nosr=(9, 11)
     opA_v=(9, 11)
     opA_p=(9, 11)
     
@@ -63,7 +73,9 @@ define token instr(16)
     opN=(3, 5)
         opFlag=(5, 5)
         opShift=(3, 4)
-    opB=(0, 2)
+    opB_r=(0, 2)
+    opB_nosr=(0, 2)
+    opB_v=(0, 2)
     opimm=(0, 5)
 
     opE1=(7, 8)
@@ -74,7 +86,8 @@ define token instr(16)
     opBitN=(0, 3)
 ;
 
-attach variables [ opA opB ] [ sp r1 r2 r3 r4 bp sr pc ];
+attach variables [ opA_r opB_r ] [ sp r1 r2 r3 r4 bp sr pc ];
+attach variables [ opA_nosr opB_nosr ] [ sp r1 r2 r3 r4 bp _ pc ];
 # Bizarrely shifted
 attach variables [ opA_p ] [ r1 r2 r3 r4 bp sr pc _ ];
 
@@ -85,35 +98,71 @@ define pcodeop segment;    # Define special pcodeop that calculates the RAM addr
                            # given the segment selector and offset as input
 define pcodeop exp;
 
+# Tables for level of indirection so SR can be packed and unpacked
+UnpackSR: is epsilon {
+    local tmp_ds = (sr >> 10) & 0x3f;
+    local tmp_cs = sr & 0x3f;
+
+    ds = tmp_ds:1;
+    # Done same way as in ARM `msr cpsr,rm`
+    N_flag = ((sr >> 9) & 0x1) != 0;
+    Z_flag = ((sr >> 8) & 0x1) != 0;
+    S_flag = ((sr >> 7) & 0x1) != 0;
+    C_flag = ((sr >> 6) & 0x1) != 0;
+    cs = tmp_cs:1;
+}
+
+PackSR: is epsilon {
+    sr = 
+        (zext(ds) << 10) |
+        (zext(N_flag) << 9) |
+        (zext(Z_flag) << 8) |
+        (zext(S_flag) << 7) |
+        (zext(C_flag) << 6) |
+        zext(cs[0,6]);
+    export sr;
+}
+
+UnpackSR_opA: is opA_v=6 & UnpackSR { }
+UnpackSR_opA: is opA_v!=6 { }
+
+opA: opA_r is opA_r { export opA_r; }
+
+opARead: sr is sr & opA_v=6 & PackSR { export PackSR; }
+opARead: opA is opA { export opA; }
+
+opB: sr is sr & opB_v=6 & PackSR { export PackSR; }
+opB: opB_r is opB_r { export opB_r; }
+
 # Macros
 
 macro push(x) {
     local data:2 = x;
-    local stack_addr:3 = segment(0:1, sp);
-    *:2 stack_addr = data;
     sp = sp - 1;
+    local stack_addr:3 = segment(0:1, sp + 1);
+    *:2 stack_addr = data;
 }
 
 macro setResultFlags(reg) {
-    $(Z_flag) = (reg == 0);
-    $(N_flag) = (reg s< 0);
+    Z_flag = (reg == 0);
+    N_flag = (reg s< 0);
 }
 
 macro setAddFlags(op1,op2) {
-    $(C_flag) = carry(op1,op2);
+    C_flag = carry(op1,op2);
 }
 
 macro setAddCarryFlags(op1,op2) {
-    $(C_flag) = (carry(op1,zext($(C_flag))) || carry(op2,op1 + zext($(C_flag))));
+    C_flag = (carry(op1,zext(C_flag)) || carry(op2,op1 + zext(C_flag)));
 }
 
 macro setSubtractFlags(op1,op2) {
-    $(S_flag) = (op1 < op2);
+    S_flag = (op1 < op2);
 }
 
 macro setSubtractCarryFlags(op1,op2) {
-    local notC = ~$(C_flag);
-    $(S_flag) = ((op1 < zext(notC)) || ((op1 - zext(notC)) < op2));
+    local notC = !C_flag;
+    S_flag = ((op1 < zext(notC)) || ((op1 - zext(notC)) < op2));
 }
 
 # Instructions
@@ -122,130 +171,98 @@ macro setSubtractCarryFlags(op1,op2) {
 # Local to a bank, will wrap around (unlike call/goto)
 
 # Positive jump with 6bit immediate
-RelP6:   relAddr is opimm [ relAddr=inst_next+opimm; ] { export *:3 relAddr; }
+RelP6:   relAddr is opimm [ relAddr=(inst_start & 0x3f0000) + ((inst_next+opimm) & 0xffff); ] { export *:3 relAddr; }
 # Negative jump with 6bit immediate
-RelN6:   relAddr is opimm [ relAddr=inst_next-opimm; ] { export *:3 relAddr; }
+RelN6:   relAddr is opimm [ relAddr=(inst_start & 0x3f0000) + ((inst_next-opimm) & 0xffff); ] { export *:3 relAddr; }
 
-:jb RelP6 is opA=7 & op0=0 & op1=0 & RelP6 {
-    if($(C_flag)) goto inst_next;
-    # TODO revisit segmented addresses
-    # In reality updates cs, the top of pc, but we don't currently support this
-    # This applies to all the jumps below
-    # $(cs) = RelP6[16,6];
+:jb RelP6 is opA_v=7 & op0=0 & op1=0 & RelP6 {
+    if(!C_flag) goto RelP6;
+}
+:jb RelN6 is opA_v=7 & op0=0 & op1=1 & RelN6 {
+    if(!C_flag) goto RelN6;
+}
+:jae RelP6 is opA_v=7 & op0=1 & op1=0 & RelP6 {
+    if(C_flag) goto RelP6;
+}
+:jae RelN6 is opA_v=7 & op0=1 & op1=1 & RelN6 {
+    if(C_flag) goto RelN6;
+}
+:jge RelP6 is opA_v=7 & op0=2 & op1=0 & RelP6 {
+    if(!S_flag) goto RelP6;
+}
+:jge RelN6 is opA_v=7 & op0=2 & op1=1 & RelN6 {
+    if(!S_flag) goto RelN6;
+}
+:jl RelP6 is opA_v=7 & op0=3 & op1=0 & RelP6 {
+    if(S_flag) goto RelP6;
+}
+:jl RelN6 is opA_v=7 & op0=3 & op1=1 & RelN6 {
+    if(S_flag) goto RelN6;
+}
+:jne RelP6 is opA_v=7 & op0=4 & op1=0 & RelP6 {
+    if(!Z_flag) goto RelP6;
+}
+:jne RelN6 is opA_v=7 & op0=4 & op1=1 & RelN6 {
+    if(!Z_flag) goto RelN6;
+}
+:je RelP6 is opA_v=7 & op0=5 & op1=0 & RelP6 {
+    if(Z_flag) goto RelP6;
+}
+:je RelN6 is opA_v=7 & op0=5 & op1=1 & RelN6 {
+    if(Z_flag) goto RelN6;
+}
+:jpl RelP6 is opA_v=7 & op0=6 & op1=0 & RelP6 {
+    if(!N_flag) goto RelP6;
+}
+:jpl RelN6 is opA_v=7 & op0=6 & op1=1 & RelN6 {
+    if(!N_flag) goto RelN6;
+}
+:jmi RelP6 is opA_v=7 & op0=7 & op1=0 & RelP6 {
+    if(N_flag) goto RelP6;
+}
+:jmi RelN6 is opA_v=7 & op0=7 & op1=1 & RelN6 {
+    if(N_flag) goto RelN6;
+}
+:jbe RelP6 is opA_v=7 & op0=8 & op1=0 & RelP6 {
+    if(Z_flag || !C_flag) goto RelP6;
+}
+:jbe RelN6 is opA_v=7 & op0=8 & op1=1 & RelN6 {
+    if(Z_flag || !C_flag) goto RelN6;
+}
+:ja RelP6 is opA_v=7 & op0=9 & op1=0 & RelP6 {
+    if(!Z_flag && C_flag) goto RelP6;
+}
+:ja RelN6 is opA_v=7 & op0=9 & op1=1 & RelN6 {
+    if(!Z_flag && C_flag) goto RelN6;
+}
+:jle RelP6 is opA_v=7 & op0=0xa & op1=0 & RelP6 {
+    if(Z_flag || S_flag) goto RelP6;
+}
+:jle RelN6 is opA_v=7 & op0=0xa & op1=1 & RelN6 {
+    if(Z_flag || S_flag) goto RelN6;
+}
+:jg RelP6 is opA_v=7 & op0=0xb & op1=0 & RelP6 {
+    if(!Z_flag && !S_flag) goto RelP6;
+}
+:jg RelN6 is opA_v=7 & op0=0xb & op1=1 & RelN6 {
+    if(!Z_flag && !S_flag) goto RelN6;
+}
+:jvc RelP6 is opA_v=7 & op0=0xc & op1=0 & RelP6 {
+    if(N_flag == S_flag) goto RelP6;
+}
+:jvc RelN6 is opA_v=7 & op0=0xc & op1=1 & RelN6 {
+    if(N_flag == S_flag) goto RelN6;
+}
+:jvs RelP6 is opA_v=7 & op0=0xd & op1=0 & RelP6 {
+    if(N_flag != S_flag) goto RelP6;
+}
+:jvs RelN6 is opA_v=7 & op0=0xd & op1=1 & RelN6 {
+    if(N_flag != S_flag) goto RelN6;
+}
+:jmp RelP6 is opA_v=7 & op0=0xe & op1=0 & RelP6 {
     goto RelP6;
 }
-:jb RelN6 is opA=7 & op0=0 & op1=1 & RelN6 {
-    if($(C_flag)) goto inst_next;
-    goto RelN6;
-}
-:jae RelP6 is opA=7 & op0=1 & op1=0 & RelP6 {
-    if(~$(C_flag)) goto inst_next;
-    goto RelP6;
-}
-:jae RelN6 is opA=7 & op0=1 & op1=1 & RelN6 {
-    if(~$(C_flag)) goto inst_next;
-    goto RelN6;
-}
-:jge RelP6 is opA=7 & op0=2 & op1=0 & RelP6 {
-    if($(S_flag)) goto inst_next;
-    goto RelP6;
-}
-:jge RelN6 is opA=7 & op0=2 & op1=1 & RelN6 {
-    if($(S_flag)) goto inst_next;
-    goto RelN6;
-}
-:jl RelP6 is opA=7 & op0=3 & op1=0 & RelP6 {
-    if(~$(S_flag)) goto inst_next;
-    goto RelP6;
-}
-:jl RelN6 is opA=7 & op0=3 & op1=1 & RelN6 {
-    if(~$(S_flag)) goto inst_next;
-    goto RelN6;
-}
-:jne RelP6 is opA=7 & op0=4 & op1=0 & RelP6 {
-    if($(Z_flag)) goto inst_next;
-    goto RelP6;
-}
-:jne RelN6 is opA=7 & op0=4 & op1=1 & RelN6 {
-    if($(Z_flag)) goto inst_next;
-    goto RelN6;
-}
-:je RelP6 is opA=7 & op0=5 & op1=0 & RelP6 {
-    if(~$(Z_flag)) goto inst_next;
-    goto RelP6;
-}
-:je RelN6 is opA=7 & op0=5 & op1=1 & RelN6 {
-    if(~$(Z_flag)) goto inst_next;
-    goto RelN6;
-}
-:jpl RelP6 is opA=7 & op0=6 & op1=0 & RelP6 {
-    if($(N_flag)) goto inst_next;
-    goto RelP6;
-}
-:jpl RelN6 is opA=7 & op0=6 & op1=1 & RelN6 {
-    if($(N_flag)) goto inst_next;
-    goto RelN6;
-}
-:jmi RelP6 is opA=7 & op0=7 & op1=0 & RelP6 {
-    if(~$(N_flag)) goto inst_next;
-    goto RelP6;
-}
-:jmi RelN6 is opA=7 & op0=7 & op1=1 & RelN6 {
-    if(~$(N_flag)) goto inst_next;
-    goto RelN6;
-}
-:jbe RelP6 is opA=7 & op0=8 & op1=0 & RelP6 {
-    if( (~$(Z_flag)) & $(C_flag) ) goto inst_next;
-    goto RelP6;
-}
-:jbe RelN6 is opA=7 & op0=8 & op1=1 & RelN6 {
-    if( (~$(Z_flag)) & $(C_flag) ) goto inst_next;
-    goto RelN6;
-}
-:ja RelP6 is opA=7 & op0=9 & op1=0 & RelP6 {
-    if( ~((~$(Z_flag)) & $(C_flag)) ) goto inst_next;
-    goto RelP6;
-}
-:ja RelN6 is opA=7 & op0=9 & op1=1 & RelN6 {
-    if( ~((~$(Z_flag)) & $(C_flag)) ) goto inst_next;
-    goto RelN6;
-}
-:jle RelP6 is opA=7 & op0=0xa & op1=0 & RelP6 {
-    if( ~($(Z_flag) | $(S_flag))) goto inst_next;
-    goto RelP6;
-}
-:jle RelN6 is opA=7 & op0=0xa & op1=1 & RelN6 {
-    if( ~($(Z_flag) | $(S_flag))) goto inst_next;
-    goto RelN6;
-}
-:jg RelP6 is opA=7 & op0=0xb & op1=0 & RelP6 {
-    if($(Z_flag) | $(S_flag)) goto inst_next;
-    goto RelP6;
-}
-:jg RelN6 is opA=7 & op0=0xb & op1=1 & RelN6 {
-    if($(Z_flag) | $(S_flag)) goto inst_next;
-    goto RelN6;
-}
-:jvc RelP6 is opA=7 & op0=0xc & op1=0 & RelP6 {
-    if( ~($(N_flag) == $(S_flag)) ) goto inst_next;
-    goto RelP6;
-}
-:jvc RelN6 is opA=7 & op0=0xc & op1=1 & RelN6 {
-    if( ~($(N_flag) == $(S_flag)) ) goto inst_next;
-    goto RelN6;
-}
-:jvs RelP6 is opA=7 & op0=0xd & op1=0 & RelP6 {
-    if( $(N_flag) == $(S_flag) ) goto inst_next;
-    goto RelP6;
-}
-:jvs RelN6 is opA=7 & op0=0xd & op1=1 & RelN6 {
-    if( $(N_flag) == $(S_flag) ) goto inst_next;
-    goto RelN6;
-}
-:jmp RelP6 is opA=7 & op0=0xe & op1=0 & RelP6 {
-    goto RelP6;
-}
-:jmp RelN6 is opA=7 & op0=0xe & op1=1 & RelN6 {
+:jmp RelN6 is opA_v=7 & op0=0xe & op1=1 & RelN6 {
     goto RelN6;
 }
 
@@ -269,25 +286,25 @@ IndirectOp: "0:"[++opB] is opN=3 & opB {
     export *:2 opB;
 } 
 IndirectOp: "ds":[opB] is opN=4 & opB {
-    local addr:3 = segment($(ds), opB);
+    local addr:3 = segment(ds, opB);
     export *:2 addr;
 } 
 IndirectOp: "ds":[opB--] is opN=5 & opB {
-    local addr:3 = segment($(ds), opB);
-    $(ds) = $(ds) - sborrow(opB, 1);
+    local addr:3 = segment(ds, opB);
+    ds = ds - sborrow(opB, 1);
     opB = opB - 1;
     export *:2 addr;
 } 
 IndirectOp: "ds":[opB++] is opN=6 & opB {
-    local addr:3 = segment($(ds), opB);
-    $(ds) = $(ds) + scarry(opB, 1);
+    local addr:3 = segment(ds, opB);
+    ds = ds + scarry(opB, 1);
     opB = opB + 1;
     export *:2 addr;
 } 
 IndirectOp: "ds":[++opB] is opN=7 & opB {
-    $(ds) = $(ds) + scarry(opB, 1);
+    ds = ds + scarry(opB, 1);
     opB = opB + 1;
-    local addr:3 = segment($(ds), opB);
+    local addr:3 = segment(ds, opB);
     export *:2 addr;
 }
 # ALU with base+displacement
@@ -303,51 +320,51 @@ ALU6Reg: opB is opB { local tmp:2 = opB; export tmp; }
 ALU6Mem: "0:"[opimm] is opimm { export *:2 opimm; }
 ALU6RShift: opB "asr" shift is opShift & opB [ shift = opShift + 1; ] {
     # Save shifted out bits in sb
-    local tmp = (opB:1 << 4) | $(sb);
+    local tmp = (opB:1 << 4) | sb;
     tmp = tmp >> shift;
-    $(sb) = tmp & 0xf:1;
+    sb = tmp & 0xf:1;
 
     local val:2 = opB s>> shift; 
     export val;
 }
 ALU6LShift: opB "lsl" shift is opFlag=0 & opShift & opB [ shift = opShift + 1; ] {
     # Save shifted out bits in sb
-    local tmp = ($(sb) << 8) | opB(1);
+    local tmp = (sb << 8) | opB(1);
     tmp = tmp >> (8 - shift);
-    $(sb) = tmp & 0xf:1;
+    sb = tmp & 0xf:1;
 
     local val:2 = opB << shift;
     export val;
 }
 ALU6LShift: opB "lsr" shift is opFlag=1 & opShift & opB [ shift = opShift + 1; ] {
     # Save shifted out bits in sb
-    local tmp = (opB:1 << 4) | $(sb);
+    local tmp = (opB:1 << 4) | sb;
     tmp = tmp >> shift;
-    $(sb) = tmp & 0xf:1;
+    sb = tmp & 0xf:1;
 
     local val:2 = opB >> shift; 
     export val;
 }
 ALU6RotShift: opB "rol" shift is opFlag=0 & opShift & opB [ shift = opShift + 1; ] {
     local val:2 = opB << shift;
-    val = val | zext($(sb));
+    val = val | zext(sb);
 
     # Save shifted out bits in sb
-    local tmp = ($(sb) << 8) | opB(1);
+    local tmp = (sb << 8) | opB(1);
     tmp = tmp >> (8 - shift);
-    $(sb) = tmp & 0xf:1;
+    sb = tmp & 0xf:1;
 
     export val;
 }
 ALU6RotShift: opB "ror" shift is opFlag=1 & opShift & opB [ shift = opShift + 1; ] {
-    local tmpVal:3 = (zext($(sb)) << 16) | zext(opB);
+    local tmpVal:3 = (zext(sb) << 16) | zext(opB);
     tmpVal = tmpVal >> shift;
     local val = tmpVal:2;
 
     # Save shifted out bits in sb
-    local tmp = (opB:1 << 4) | $(sb);
+    local tmp = (opB:1 << 4) | sb;
     tmp = tmp >> shift;
-    $(sb) = tmp & 0xf:1;
+    sb = tmp & 0xf:1;
 
     export val;
 }
@@ -358,474 +375,547 @@ ALU6DstStack: "0:"["bp"+opimm] is op1=0 & opimm {
 }
 
 # r1 += 7
-:^opA += ALU6BaseDisplacement is op0=0 & op1=0 & opA & ALU6BaseDisplacement {
+:^opA += ALU6BaseDisplacement is op0=0 & op1=0 & opA & UnpackSR_opA & ALU6BaseDisplacement {
     setAddFlags(opA, ALU6BaseDisplacement);
     opA = opA + ALU6BaseDisplacement;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA += ALU6Opimm is op0=0 & op1=1 & opA & ALU6Opimm {
+:^opA += ALU6Opimm is op0=0 & op1=1 & opA & UnpackSR_opA & ALU6Opimm {
     setAddFlags(opA, ALU6Opimm);
     opA = opA + ALU6Opimm;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA += IndirectOp is op0=0 & op1=3 & opA & IndirectOp {
+:^opA += IndirectOp is op0=0 & op1=3 & opA & UnpackSR_opA & IndirectOp {
     setAddFlags(opA, IndirectOp);
     opA = opA + IndirectOp;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA += ALU6Reg is op0=0 & op1=4 & opN=0 & opA & ALU6Reg {
+:^opA += ALU6Reg is op0=0 & op1=4 & opN=0 & opA & UnpackSR_opA & ALU6Reg {
     setAddFlags(opA, ALU6Reg);
     opA = opA + ALU6Reg;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA += ALU6RShift is op0=0 & op1=4 & opFlag=1 & opA & ALU6RShift {
+:^opA += ALU6RShift is op0=0 & op1=4 & opFlag=1 & opA & UnpackSR_opA & ALU6RShift {
     setAddFlags(opA, ALU6RShift);
     opA = opA + ALU6RShift;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA += ALU6LShift is op0=0 & op1=5 & opA & ALU6LShift {
+:^opA += ALU6LShift is op0=0 & op1=5 & opA & UnpackSR_opA & ALU6LShift {
     setAddFlags(opA, ALU6LShift);
     opA = opA + ALU6LShift;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA += ALU6RotShift is op0=0 & op1=6 & opA & ALU6RotShift {
+:^opA += ALU6RotShift is op0=0 & op1=6 & opA & UnpackSR_opA & ALU6RotShift {
     setAddFlags(opA, ALU6RotShift);
     opA = opA + ALU6RotShift;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA += ALU6Mem is op0=0 & op1=7 & opA & ALU6Mem {
+:^opA += ALU6Mem is op0=0 & op1=7 & opA & UnpackSR_opA & ALU6Mem {
     setAddFlags(opA, ALU6Mem);
     opA = opA + ALU6Mem;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
 
 # r1 += 7, carry
-:^opA += ALU6BaseDisplacement, "carry" is op0=1 & op1=0 & opA & ALU6BaseDisplacement {
-    local oldCarry = zext($(C_flag));
+:^opA += ALU6BaseDisplacement, "carry" is op0=1 & op1=0 & opA & UnpackSR_opA & ALU6BaseDisplacement {
+    local oldCarry = zext(C_flag);
     setAddCarryFlags(opA, ALU6BaseDisplacement);
     opA = opA + ALU6BaseDisplacement + oldCarry;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA += ALU6Opimm, "carry" is op0=1 & op1=1 & opA & ALU6Opimm {
-    local oldCarry = zext($(C_flag));
+:^opA += ALU6Opimm, "carry" is op0=1 & op1=1 & opA & UnpackSR_opA & ALU6Opimm {
+    local oldCarry = zext(C_flag);
     setAddCarryFlags(opA, ALU6Opimm);
     opA = opA + ALU6Opimm + oldCarry;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA += IndirectOp, "carry" is op0=1 & op1=3 & opA & IndirectOp {
-    local oldCarry = zext($(C_flag));
+:^opA += IndirectOp, "carry" is op0=1 & op1=3 & opA & UnpackSR_opA & IndirectOp {
+    local oldCarry = zext(C_flag);
     setAddCarryFlags(opA, IndirectOp);
     opA = opA + IndirectOp + oldCarry;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA += ALU6Reg, "carry" is op0=1 & op1=4 & opN=0 & opA & ALU6Reg {
-    local oldCarry = zext($(C_flag));
+:^opA += ALU6Reg, "carry" is op0=1 & op1=4 & opN=0 & opA & UnpackSR_opA & ALU6Reg {
+    local oldCarry = zext(C_flag);
     setAddCarryFlags(opA, ALU6Reg);
     opA = opA + ALU6Reg + oldCarry;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA += ALU6RShift, "carry" is op0=1 & op1=4 & opFlag=1 & opA & ALU6RShift {
-    local oldCarry = zext($(C_flag));
+:^opA += ALU6RShift, "carry" is op0=1 & op1=4 & opFlag=1 & opA & UnpackSR_opA & ALU6RShift {
+    local oldCarry = zext(C_flag);
     setAddCarryFlags(opA, ALU6RShift);
     opA = opA + ALU6RShift + oldCarry;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA += ALU6LShift, "carry" is op0=1 & op1=5 & opA & ALU6LShift {
-    local oldCarry = zext($(C_flag));
+:^opA += ALU6LShift, "carry" is op0=1 & op1=5 & opA & UnpackSR_opA & ALU6LShift {
+    local oldCarry = zext(C_flag);
     setAddCarryFlags(opA, ALU6LShift);
     opA = opA + ALU6LShift + oldCarry;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA += ALU6RotShift, "carry" is op0=1 & op1=6 & opA & ALU6RotShift {
-    local oldCarry = zext($(C_flag));
+:^opA += ALU6RotShift, "carry" is op0=1 & op1=6 & opA & UnpackSR_opA & ALU6RotShift {
+    local oldCarry = zext(C_flag);
     setAddCarryFlags(opA, ALU6RotShift);
     opA = opA + ALU6RotShift + oldCarry;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA += ALU6Mem, "carry" is op0=1 & op1=7 & opA & ALU6Mem {
-    local oldCarry = zext($(C_flag));
+:^opA += ALU6Mem, "carry" is op0=1 & op1=7 & opA & UnpackSR_opA & ALU6Mem {
+    local oldCarry = zext(C_flag);
     setAddCarryFlags(opA, ALU6Mem);
     opA = opA + ALU6Mem + oldCarry;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
 
 # r1 -= 7
-:^opA -= ALU6BaseDisplacement is op0=2 & op1=0 & opA & ALU6BaseDisplacement  {
+:^opA -= ALU6BaseDisplacement is op0=2 & op1=0 & opA & UnpackSR_opA & ALU6BaseDisplacement  {
     setSubtractFlags(opA, ALU6BaseDisplacement);
     opA = opA - ALU6BaseDisplacement;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA -= ALU6Opimm is op0=2 & op1=1 & opA & ALU6Opimm  {
+:^opA -= ALU6Opimm is op0=2 & op1=1 & opA & UnpackSR_opA & ALU6Opimm  {
     setSubtractFlags(opA, ALU6Opimm);
     opA = opA - ALU6Opimm;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA -= IndirectOp is op0=2 & op1=3 & opA & IndirectOp  {
+:^opA -= IndirectOp is op0=2 & op1=3 & opA & UnpackSR_opA & IndirectOp  {
     setSubtractFlags(opA, IndirectOp);
     opA = opA - IndirectOp;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA -= ALU6Reg is op0=2 & op1=4 & opN=0 & opA & ALU6Reg  {
+:^opA -= ALU6Reg is op0=2 & op1=4 & opN=0 & opA & UnpackSR_opA & ALU6Reg  {
     setSubtractFlags(opA, ALU6Reg);
     opA = opA - ALU6Reg;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA -= ALU6RShift is op0=2 & op1=4 & opFlag=1 & opA & ALU6RShift  {
+:^opA -= ALU6RShift is op0=2 & op1=4 & opFlag=1 & opA & UnpackSR_opA & ALU6RShift  {
     setSubtractFlags(opA, ALU6RShift);
     opA = opA - ALU6RShift;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA -= ALU6LShift is op0=2 & op1=5 & opA & ALU6LShift  {
+:^opA -= ALU6LShift is op0=2 & op1=5 & opA & UnpackSR_opA & ALU6LShift  {
     setSubtractFlags(opA, ALU6LShift);
     opA = opA - ALU6LShift;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA -= ALU6RotShift is op0=2 & op1=6 & opA & ALU6RotShift  {
+:^opA -= ALU6RotShift is op0=2 & op1=6 & opA & UnpackSR_opA & ALU6RotShift  {
     setSubtractFlags(opA, ALU6RotShift);
     opA = opA - ALU6RotShift;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA -= ALU6Mem is op0=2 & op1=7 & opA & ALU6Mem  {
+:^opA -= ALU6Mem is op0=2 & op1=7 & opA & UnpackSR_opA & ALU6Mem  {
     setSubtractFlags(opA, ALU6Mem);
     opA = opA - ALU6Mem;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
 # r1 -= 7, carry
-:^opA -= ALU6BaseDisplacement, "carry" is op0=3 & op1=0 & opA & ALU6BaseDisplacement  {
-    local oldCarry = zext($(C_flag));
+:^opA -= ALU6BaseDisplacement, "carry" is op0=3 & op1=0 & opA & UnpackSR_opA & ALU6BaseDisplacement  {
+    local oldCarry = zext(C_flag);
     setSubtractCarryFlags(opA, ALU6BaseDisplacement);
     opA = opA - ALU6BaseDisplacement - ~oldCarry;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA -= ALU6Opimm, "carry" is op0=3 & op1=1 & opA & ALU6Opimm  {
-    local oldCarry = zext($(C_flag));
+:^opA -= ALU6Opimm, "carry" is op0=3 & op1=1 & opA & UnpackSR_opA & ALU6Opimm  {
+    local oldCarry = zext(C_flag);
     setSubtractCarryFlags(opA, ALU6Opimm);
     opA = opA - ALU6Opimm - ~oldCarry;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA -= IndirectOp, "carry" is op0=3 & op1=3 & opA & IndirectOp  {
-    local oldCarry = zext($(C_flag));
+:^opA -= IndirectOp, "carry" is op0=3 & op1=3 & opA & UnpackSR_opA & IndirectOp  {
+    local oldCarry = zext(C_flag);
     setSubtractCarryFlags(opA, IndirectOp);
     opA = opA - IndirectOp - ~oldCarry;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA -= ALU6Reg, "carry" is op0=3 & op1=4 & opN=0 & opA & ALU6Reg  {
-    local oldCarry = zext($(C_flag));
+:^opA -= ALU6Reg, "carry" is op0=3 & op1=4 & opN=0 & opA & UnpackSR_opA & ALU6Reg  {
+    local oldCarry = zext(C_flag);
     setSubtractCarryFlags(opA, ALU6Reg);
     opA = opA - ALU6Reg - ~oldCarry;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA -= ALU6RShift, "carry" is op0=3 & op1=4 & opFlag=1 & opA & ALU6RShift  {
-    local oldCarry = zext($(C_flag));
+:^opA -= ALU6RShift, "carry" is op0=3 & op1=4 & opFlag=1 & opA & UnpackSR_opA & ALU6RShift  {
+    local oldCarry = zext(C_flag);
     setSubtractCarryFlags(opA, ALU6RShift);
     opA = opA - ALU6RShift - ~oldCarry;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA -= ALU6LShift, "carry" is op0=3 & op1=5 & opA & ALU6LShift  {
-    local oldCarry = zext($(C_flag));
+:^opA -= ALU6LShift, "carry" is op0=3 & op1=5 & opA & UnpackSR_opA & ALU6LShift  {
+    local oldCarry = zext(C_flag);
     setSubtractCarryFlags(opA, ALU6LShift);
     opA = opA - ALU6LShift - ~oldCarry;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA -= ALU6RotShift, "carry" is op0=3 & op1=6 & opA & ALU6RotShift  {
-    local oldCarry = zext($(C_flag));
+:^opA -= ALU6RotShift, "carry" is op0=3 & op1=6 & opA & UnpackSR_opA & ALU6RotShift  {
+    local oldCarry = zext(C_flag);
     setSubtractCarryFlags(opA, ALU6RotShift);
     opA = opA - ALU6RotShift - ~oldCarry;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA -= ALU6Mem, "carry" is op0=3 & op1=7 & opA & ALU6Mem  {
-    local oldCarry = zext($(C_flag));
+:^opA -= ALU6Mem, "carry" is op0=3 & op1=7 & opA & UnpackSR_opA & ALU6Mem  {
+    local oldCarry = zext(C_flag);
     setSubtractCarryFlags(opA, ALU6Mem);
     opA = opA - ALU6Mem - ~oldCarry;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
 
 # cmp r1, 7
-:cmp opA, ALU6BaseDisplacement is op0=4 & op1=0 & opA & ALU6BaseDisplacement  {
-    setSubtractCarryFlags(opA, ALU6BaseDisplacement);
-    local res = opA - ALU6BaseDisplacement;
+:cmp opARead, ALU6BaseDisplacement is op0=4 & op1=0 & opARead & ALU6BaseDisplacement  {
+    setSubtractCarryFlags(opARead, ALU6BaseDisplacement);
+    local res = opARead - ALU6BaseDisplacement;
     setResultFlags(res);
 }
-:cmp opA, ALU6Opimm is op0=4 & op1=1 & opA & ALU6Opimm  {
-    setSubtractCarryFlags(opA, ALU6Opimm);
-    local res = opA - ALU6Opimm;
+:cmp opARead, ALU6Opimm is op0=4 & op1=1 & opARead & ALU6Opimm  {
+    setSubtractCarryFlags(opARead, ALU6Opimm);
+    local res = opARead - ALU6Opimm;
     setResultFlags(res);
 }
-:cmp opA, IndirectOp is op0=4 & op1=3 & opA & IndirectOp  {
-    setSubtractCarryFlags(opA, IndirectOp);
-    local res = opA - IndirectOp;
+:cmp opARead, IndirectOp is op0=4 & op1=3 & opARead & IndirectOp  {
+    setSubtractCarryFlags(opARead, IndirectOp);
+    local res = opARead - IndirectOp;
     setResultFlags(res);
 }
-:cmp opA, ALU6Reg is op0=4 & op1=4 & opN=0 & opA & ALU6Reg  {
-    setSubtractCarryFlags(opA, ALU6Reg);
-    local res = opA - ALU6Reg;
+:cmp opARead, ALU6Reg is op0=4 & op1=4 & opN=0 & opARead & ALU6Reg  {
+    setSubtractCarryFlags(opARead, ALU6Reg);
+    local res = opARead - ALU6Reg;
     setResultFlags(res);
 }
-:cmp opA, ALU6RShift is op0=4 & op1=4 & opFlag=1 & opA & ALU6RShift  {
-    setSubtractCarryFlags(opA, ALU6RShift);
-    local res = opA - ALU6RShift;
+:cmp opARead, ALU6RShift is op0=4 & op1=4 & opFlag=1 & opARead & ALU6RShift  {
+    setSubtractCarryFlags(opARead, ALU6RShift);
+    local res = opARead - ALU6RShift;
     setResultFlags(res);
 }
-:cmp opA, ALU6LShift is op0=4 & op1=5 & opA & ALU6LShift  {
-    setSubtractCarryFlags(opA, ALU6LShift);
-    local res = opA - ALU6LShift;
+:cmp opARead, ALU6LShift is op0=4 & op1=5 & opARead & ALU6LShift  {
+    setSubtractCarryFlags(opARead, ALU6LShift);
+    local res = opARead - ALU6LShift;
     setResultFlags(res);
 }
-:cmp opA, ALU6RotShift is op0=4 & op1=6 & opA & ALU6RotShift  {
-    setSubtractCarryFlags(opA, ALU6RotShift);
-    local res = opA - ALU6RotShift;
+:cmp opARead, ALU6RotShift is op0=4 & op1=6 & opARead & ALU6RotShift  {
+    setSubtractCarryFlags(opARead, ALU6RotShift);
+    local res = opARead - ALU6RotShift;
     setResultFlags(res);
 }
-:cmp opA, ALU6Mem is op0=4 & op1=7 & opA & ALU6Mem  {
-    setSubtractCarryFlags(opA, ALU6Mem);
-    local res = opA - ALU6Mem;
+:cmp opARead, ALU6Mem is op0=4 & op1=7 & opARead & ALU6Mem  {
+    setSubtractCarryFlags(opARead, ALU6Mem);
+    local res = opARead - ALU6Mem;
     setResultFlags(res);
 } 
 # r1 = -7
-:^opA = -ALU6BaseDisplacement is op0=6 & op1=0 & opA & ALU6BaseDisplacement  {
+:^opA = -ALU6BaseDisplacement is op0=6 & op1=0 & opA & UnpackSR_opA & ALU6BaseDisplacement  {
     opA = -ALU6BaseDisplacement;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA = -ALU6Opimm is op0=6 & op1=1 & opA & ALU6Opimm  {
+:^opA = -ALU6Opimm is op0=6 & op1=1 & opA & UnpackSR_opA & ALU6Opimm  {
     opA = -ALU6Opimm;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA = -IndirectOp is op0=6 & op1=3 & opA & IndirectOp  {
+:^opA = -IndirectOp is op0=6 & op1=3 & opA & UnpackSR_opA & IndirectOp  {
     opA = -IndirectOp;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA = -ALU6Reg is op0=6 & op1=4 & opN=0 & opA & ALU6Reg  {
+:^opA = -ALU6Reg is op0=6 & op1=4 & opN=0 & opA & UnpackSR_opA & ALU6Reg  {
     opA = -ALU6Reg;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA = -ALU6RShift is op0=6 & op1=4 & opFlag=1 & opA & ALU6RShift  {
+:^opA = -ALU6RShift is op0=6 & op1=4 & opFlag=1 & opA & UnpackSR_opA & ALU6RShift  {
     opA = -ALU6RShift;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA = -ALU6LShift is op0=6 & op1=5 & opA & ALU6LShift  {
+:^opA = -ALU6LShift is op0=6 & op1=5 & opA & UnpackSR_opA & ALU6LShift  {
     opA = -ALU6LShift;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA = -ALU6RotShift is op0=6 & op1=6 & opA & ALU6RotShift  {
+:^opA = -ALU6RotShift is op0=6 & op1=6 & opA & UnpackSR_opA & ALU6RotShift  {
     opA = -ALU6RotShift;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA = -ALU6Mem is op0=6 & op1=7 & opA & ALU6Mem  {
+:^opA = -ALU6Mem is op0=6 & op1=7 & opA & UnpackSR_opA & ALU6Mem  {
     opA = -ALU6Mem;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
 # r1 ^= 7
-:^opA "^"= ALU6BaseDisplacement is op0=8 & op1=0 & opA & ALU6BaseDisplacement  {
+:^opA "^"= ALU6BaseDisplacement is op0=8 & op1=0 & opA & UnpackSR_opA & ALU6BaseDisplacement  {
     opA = opA ^ ALU6BaseDisplacement;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA "^"= ALU6Opimm is op0=8 & op1=1 & opA & ALU6Opimm  {
+:^opA "^"= ALU6Opimm is op0=8 & op1=1 & opA & UnpackSR_opA & ALU6Opimm  {
     opA = opA ^ ALU6Opimm;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA "^"= IndirectOp is op0=8 & op1=3 & opA & IndirectOp  {
+:^opA "^"= IndirectOp is op0=8 & op1=3 & opA & UnpackSR_opA & IndirectOp  {
     opA = opA ^ IndirectOp;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA "^"= ALU6Reg is op0=8 & op1=4 & opN=0 & opA & ALU6Reg  {
+:^opA "^"= ALU6Reg is op0=8 & op1=4 & opN=0 & opA & UnpackSR_opA & ALU6Reg  {
     opA = opA ^ ALU6Reg;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA "^"= ALU6RShift is op0=8 & op1=4 & opFlag=1 & opA & ALU6RShift  {
+:^opA "^"= ALU6RShift is op0=8 & op1=4 & opFlag=1 & opA & UnpackSR_opA & ALU6RShift  {
     opA = opA ^ ALU6RShift;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA "^"= ALU6LShift is op0=8 & op1=5 & opA & ALU6LShift  {
+:^opA "^"= ALU6LShift is op0=8 & op1=5 & opA & UnpackSR_opA & ALU6LShift  {
     opA = opA ^ ALU6LShift;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA "^"= ALU6RotShift is op0=8 & op1=6 & opA & ALU6RotShift  {
+:^opA "^"= ALU6RotShift is op0=8 & op1=6 & opA & UnpackSR_opA & ALU6RotShift  {
     opA = opA ^ ALU6RotShift;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA "^"= ALU6Mem is op0=8 & op1=7 & opA & ALU6Mem  {
+:^opA "^"= ALU6Mem is op0=8 & op1=7 & opA & UnpackSR_opA & ALU6Mem  {
     opA = opA ^ ALU6Mem;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
 
 # r1 = 7
-:^opA = ALU6BaseDisplacement is op0=9 & op1=0 & opA & ALU6BaseDisplacement  {
+:^opA = ALU6BaseDisplacement is op0=9 & op1=0 & opA & UnpackSR_opA & ALU6BaseDisplacement  {
     opA = ALU6BaseDisplacement;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA = ALU6Opimm is op0=9 & op1=1 & opA & ALU6Opimm  {
+:^opA = ALU6Opimm is op0=9 & op1=1 & opA & UnpackSR_opA & ALU6Opimm  {
     opA = ALU6Opimm;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA = IndirectOp is op0=9 & op1=3 & opA & IndirectOp  {
+:^opA = IndirectOp is op0=9 & op1=3 & opA & UnpackSR_opA & IndirectOp  {
     opA = IndirectOp;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA = ALU6Reg is op0=9 & op1=4 & opN=0 & opA & ALU6Reg  {
+:^opA = ALU6Reg is op0=9 & op1=4 & opN=0 & opA & UnpackSR_opA & ALU6Reg  {
     opA = ALU6Reg;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA = ALU6RShift is op0=9 & op1=4 & opFlag=1 & opA & ALU6RShift  {
+:^opA = ALU6RShift is op0=9 & op1=4 & opFlag=1 & opA & UnpackSR_opA & ALU6RShift  {
     opA = ALU6RShift;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA = ALU6LShift is op0=9 & op1=5 & opA & ALU6LShift  {
+:^opA = ALU6LShift is op0=9 & op1=5 & opA & UnpackSR_opA & ALU6LShift  {
     opA = ALU6LShift;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA = ALU6RotShift is op0=9 & op1=6 & opA & ALU6RotShift  {
+:^opA = ALU6RotShift is op0=9 & op1=6 & opA & UnpackSR_opA & ALU6RotShift  {
     opA = ALU6RotShift;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA = ALU6Mem is op0=9 & op1=7 & opA & ALU6Mem  {
+:^opA = ALU6Mem is op0=9 & op1=7 & opA & UnpackSR_opA & ALU6Mem  {
     opA = ALU6Mem;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
 # r1 |= 7
-:^opA |= ALU6BaseDisplacement is op0=0xa & op1=0 & opA & ALU6BaseDisplacement  {
+:^opA |= ALU6BaseDisplacement is op0=0xa & op1=0 & opA & UnpackSR_opA & ALU6BaseDisplacement  {
     opA = opA | ALU6BaseDisplacement;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA |= ALU6Opimm is op0=0xa & op1=1 & opA & ALU6Opimm  {
+:^opA |= ALU6Opimm is op0=0xa & op1=1 & opA & UnpackSR_opA & ALU6Opimm  {
     opA = opA | ALU6Opimm;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA |= IndirectOp is op0=0xa & op1=3 & opA & IndirectOp  {
+:^opA |= IndirectOp is op0=0xa & op1=3 & opA & UnpackSR_opA & IndirectOp  {
     opA = opA | IndirectOp;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA |= ALU6Reg is op0=0xa & op1=4 & opN=0 & opA & ALU6Reg  {
+:^opA |= ALU6Reg is op0=0xa & op1=4 & opN=0 & opA & UnpackSR_opA & ALU6Reg  {
     opA = opA | ALU6Reg;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA |= ALU6RShift is op0=0xa & op1=4 & opFlag=1 & opA & ALU6RShift  {
+:^opA |= ALU6RShift is op0=0xa & op1=4 & opFlag=1 & opA & UnpackSR_opA & ALU6RShift  {
     opA = opA | ALU6RShift;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA |= ALU6LShift is op0=0xa & op1=5 & opA & ALU6LShift  {
+:^opA |= ALU6LShift is op0=0xa & op1=5 & opA & UnpackSR_opA & ALU6LShift  {
     opA = opA | ALU6LShift;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA |= ALU6RotShift is op0=0xa & op1=6 & opA & ALU6RotShift  {
+:^opA |= ALU6RotShift is op0=0xa & op1=6 & opA & UnpackSR_opA & ALU6RotShift  {
     opA = opA | ALU6RotShift;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA |= ALU6Mem is op0=0xa & op1=7 & opA & ALU6Mem  {
+:^opA |= ALU6Mem is op0=0xa & op1=7 & opA & UnpackSR_opA & ALU6Mem  {
     opA = opA | ALU6Mem;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
 # r1 &= 7
-:^opA &= ALU6BaseDisplacement is op0=0xb & op1=0 & opA & ALU6BaseDisplacement  {
+:^opA &= ALU6BaseDisplacement is op0=0xb & op1=0 & opA & UnpackSR_opA & ALU6BaseDisplacement  {
     opA = opA & ALU6BaseDisplacement;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA &= ALU6Opimm is op0=0xb & op1=1 & opA & ALU6Opimm  {
+:^opA &= ALU6Opimm is op0=0xb & op1=1 & opA & UnpackSR_opA & ALU6Opimm  {
     opA = opA & ALU6Opimm;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA &= IndirectOp is op0=0xb & op1=3 & opA & IndirectOp  {
+:^opA &= IndirectOp is op0=0xb & op1=3 & opA & UnpackSR_opA & IndirectOp  {
     opA = opA & IndirectOp;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA &= ALU6Reg is op0=0xb & op1=4 & opN=0 & opA & ALU6Reg  {
+:^opA &= ALU6Reg is op0=0xb & op1=4 & opN=0 & opA & UnpackSR_opA & ALU6Reg  {
     opA = opA & ALU6Reg;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA &= ALU6RShift is op0=0xb & op1=4 & opFlag=1 & opA & ALU6RShift  {
+:^opA &= ALU6RShift is op0=0xb & op1=4 & opFlag=1 & opA & UnpackSR_opA & ALU6RShift  {
     opA = opA & ALU6RShift;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA &= ALU6LShift is op0=0xb & op1=5 & opA & ALU6LShift  {
+:^opA &= ALU6LShift is op0=0xb & op1=5 & opA & UnpackSR_opA & ALU6LShift  {
     opA = opA & ALU6LShift;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA &= ALU6RotShift is op0=0xb & op1=6 & opA & ALU6RotShift  {
+:^opA &= ALU6RotShift is op0=0xb & op1=6 & opA & UnpackSR_opA & ALU6RotShift  {
     opA = opA & ALU6RotShift;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA &= ALU6Mem is op0=0xb & op1=7 & opA & ALU6Mem  {
+:^opA &= ALU6Mem is op0=0xb & op1=7 & opA & UnpackSR_opA & ALU6Mem  {
     opA = opA & ALU6Mem;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
 # test r1, 7
-:test opA, ALU6BaseDisplacement is op0=0xc & op1=0 & opA & ALU6BaseDisplacement  {
-    local res = opA & ALU6BaseDisplacement;
+:test opARead, ALU6BaseDisplacement is op0=0xc & op1=0 & opARead & ALU6BaseDisplacement  {
+    local res = opARead & ALU6BaseDisplacement;
     setResultFlags(res);
 }
-:test opA, ALU6Opimm is op0=0xc & op1=1 & opA & ALU6Opimm  {
-    local res = opA & ALU6Opimm;
+:test opARead, ALU6Opimm is op0=0xc & op1=1 & opARead & ALU6Opimm  {
+    local res = opARead & ALU6Opimm;
     setResultFlags(res);
 }
-:test opA, IndirectOp is op0=0xc & op1=3 & opA & IndirectOp  {
-    local res = opA & IndirectOp;
+:test opARead, IndirectOp is op0=0xc & op1=3 & opARead & IndirectOp  {
+    local res = opARead & IndirectOp;
     setResultFlags(res);
 }
-:test opA, ALU6Reg is op0=0xc & op1=4 & opN=0 & opA & ALU6Reg  {
-    local res = opA & ALU6Reg;
+:test opARead, ALU6Reg is op0=0xc & op1=4 & opN=0 & opARead & ALU6Reg  {
+    local res = opARead & ALU6Reg;
     setResultFlags(res);
 }
-:test opA, ALU6RShift is op0=0xc & op1=4 & opFlag=1 & opA & ALU6RShift  {
-    local res = opA & ALU6RShift;
+:test opARead, ALU6RShift is op0=0xc & op1=4 & opFlag=1 & opARead & ALU6RShift  {
+    local res = opARead & ALU6RShift;
     setResultFlags(res);
 }
-:test opA, ALU6LShift is op0=0xc & op1=5 & opA & ALU6LShift  {
-    local res = opA & ALU6LShift;
+:test opARead, ALU6LShift is op0=0xc & op1=5 & opARead & ALU6LShift  {
+    local res = opARead & ALU6LShift;
     setResultFlags(res);
 }
-:test opA, ALU6RotShift is op0=0xc & op1=6 & opA & ALU6RotShift  {
-    local res = opA & ALU6RotShift;
+:test opARead, ALU6RotShift is op0=0xc & op1=6 & opARead & ALU6RotShift  {
+    local res = opARead & ALU6RotShift;
     setResultFlags(res);
 }
-:test opA, ALU6Mem is op0=0xc & op1=7 & opA & ALU6Mem  {
-    local res = opA & ALU6Mem;
+:test opARead, ALU6Mem is op0=0xc & op1=7 & opARead & ALU6Mem  {
+    local res = opARead & ALU6Mem;
     setResultFlags(res);
 }
 # [bp+7] = r1
-:^ALU6DstStack = opA is op0=0xd & op1=0 & opA & ALU6DstStack  {
-   ALU6DstStack = opA;
+:^ALU6DstStack = opARead is op0=0xd & op1=0 & opARead & ALU6DstStack  {
+   ALU6DstStack = opARead;
     # does not update flags
 }
-:^IndirectOp = opA is op0=0xd & op1=3 & opA & IndirectOp  {
-   IndirectOp = opA;
+:^IndirectOp = opARead is op0=0xd & op1=3 & opARead & IndirectOp  {
+   IndirectOp = opARead;
 }
 
-StackOpA: "0:"[opA] is opA {
-    export *:2 opA;
+StackOpA: "0:"[opARead] is opARead {
+    export *:2 opARead;
 }
-DataOpA: "ds:"[opA] is opA {
-    local addr:3 = segment($(ds), opA);
+DataOpA: "ds:"[opARead] is opARead {
+    local addr:3 = segment(ds, opARead);
     export *:2 addr;
 }
 
 # Otherwise cannot be distinguished. Cannot put in directly because
 # wrong type (should be family) in pattern equation
-with : opA!=7 { 
+with : opA_v!=7 { 
     # Bit Manipulation
     # Test bit
-    :tstb opA, opBitN is op0=0xe & op1=1 & opBitFn=0 & opBitN & opA {
+    :tstb opARead, opBitN is op0=0xe & op1=1 & opBitFn=0 & opBitN & opARead {
         local mask = 1 << opBitN;
-        $(Z_flag) = (opA & mask) == 0;
+        Z_flag = (opARead & mask) == 0;
     }
     :tstb StackOpA, opB is op0=0xe & op1=4 & opBitFn=0 & opBitFlg=0 & opB & StackOpA {
         local mask = 1 << opB;
-        $(Z_flag) = (StackOpA & mask) == 0;
+        Z_flag = (StackOpA & mask) == 0;
     }
     :tstb DataOpA, opB is op0=0xe & op1=5 & opBitFn=0 & opBitFlg=0 & opB & DataOpA {
         local mask = 1 << opB;
-        $(Z_flag) = (DataOpA & mask) == 0;
+        Z_flag = (DataOpA & mask) == 0;
     }
     :tstb StackOpA, opBitN is op0=0xe & op1=6 & opBitFn=0 & opBitN & StackOpA {
         local mask = 1 << opBitN;
-        $(Z_flag) = (StackOpA & mask) == 0;
+        Z_flag = (StackOpA & mask) == 0;
     }
     :tstb DataOpA, opBitN is op0=0xe & op1=7 & opBitFn=0 & opBitN & DataOpA {
         local mask = 1 << opBitN;
-        $(Z_flag) = (DataOpA & mask) == 0;
+        Z_flag = (DataOpA & mask) == 0;
     }
     # Set bit
-    :setb opA, opBitN is op0=0xe & op1=1 & opBitFn=1 & opBitN & opA { 
+    :setb opARead, opBitN is op0=0xe & op1=1 & opBitFn=1 & opBitN & opARead & UnpackSR_opA { 
         local mask = 1 << opBitN;
-        opA = opA | mask;
+        opARead = opARead | mask;
+        build UnpackSR_opA;
     }
     :setb StackOpA, opB is op0=0xe & op1=4 & opBitFn=1 & opBitFlg=0 & opB & StackOpA { 
         local mask = 1 << opB;
@@ -844,9 +934,10 @@ with : opA!=7 {
         DataOpA = DataOpA | mask;
     }
     # Clear bit
-    :clrb opA, opBitN is op0=0xe & op1=1 & opBitFn=2 & opBitN & opA {
+    :clrb opARead, opBitN is op0=0xe & op1=1 & opBitFn=2 & opBitN & opARead & UnpackSR_opA {
         local mask = 1 << opBitN;
-        opA = opA & ~mask;
+        opARead = opARead & ~mask;
+        build UnpackSR_opA;
     }
     :clrb StackOpA, opB is op0=0xe & op1=4 & opBitFn=2 & opBitFlg=0 & opB & StackOpA {
         local mask = 1 << opB;
@@ -865,9 +956,10 @@ with : opA!=7 {
         DataOpA = DataOpA & ~mask;
     }
     # Toggle bit
-    :invb opA, opBitN is op0=0xe & op1=1 & opBitFn=3 & opBitN & opA {
+    :invb opARead, opBitN is op0=0xe & op1=1 & opBitFn=3 & opBitN & opARead & UnpackSR_opA {
         local mask = 1 << opBitN;
-        opA = opA ^ mask;
+        opARead = opARead ^ mask;
+        build UnpackSR_opA;
     }
     :invb StackOpA, opB is op0=0xe & op1=4 & opBitFn=3 & opBitFlg=0 & opB & StackOpA {
         local mask = 1 << opB;
@@ -890,21 +982,23 @@ with : opA!=7 {
 Bank0Mem: "0:"[imm16] is imm16 { export *:2 imm16; }
 
 # ALU16
-# TODO: this opA!=7 isn't true for all cases, should move to specific ALU6Terms after inspection
+# TODO: this opA_v!=7 isn't true for all cases, should move to specific ALU6Terms after inspection
 # with : (op0!=0xf & op0!=0xe & op1=4 & (opN=1 | opN=2 | opN=3)) ... {
 
 # r1 = r2 + 0x1234
 # This trickery makes the assembler suggest impossible instructions...
 # like [0x1234] = r2 + [0x1234]
 # It won't crash or produce invalid machine code. Merely a UX problem
-:^opA = opB + imm16 is (op0=0 & op1=4 & opN=1 & opA & opB) ; imm16 {
+:^opA = opB + imm16 is (op0=0 & op1=4 & opN=1 & opA & UnpackSR_opA & opB) ; imm16 {
 	setAddFlags(opB, imm16);
 	opA = opB + imm16;
+    build UnpackSR_opA;
 	setResultFlags(opA);
 }
-:^opA = opB + Bank0Mem is (op0=0 & op1=4 & opN=2 & opA & opB) ; Bank0Mem {
+:^opA = opB + Bank0Mem is (op0=0 & op1=4 & opN=2 & opA & UnpackSR_opA & opB) ; Bank0Mem {
 	setAddFlags(opB, Bank0Mem);
 	opA = opB + Bank0Mem;
+    build UnpackSR_opA;
 	setResultFlags(opA);
 }
 :^Bank0Mem = opB + opA is (op0=0 & op1=4 & opN=3 & opA & opB) ; Bank0Mem {
@@ -913,33 +1007,37 @@ Bank0Mem: "0:"[imm16] is imm16 { export *:2 imm16; }
 	setResultFlags(Bank0Mem);
 }
 # r1 = r2 + 0x1234, carry
-:^opA = opB + imm16, "carry" is (op0=1 & op1=4 & opN=1 & opA & opB) ; imm16 {
-    local oldCarry = zext($(C_flag));
+:^opA = opB + imm16, "carry" is (op0=1 & op1=4 & opN=1 & opA & UnpackSR_opA & opB) ; imm16 {
+    local oldCarry = zext(C_flag);
     setAddCarryFlags(opB, imm16);
     opA = opB + imm16 + oldCarry;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA = opB + Bank0Mem, "carry" is (op0=1 & op1=4 & opN=2 & opA & opB) ; Bank0Mem {
-    local oldCarry = zext($(C_flag));
+:^opA = opB + Bank0Mem, "carry" is (op0=1 & op1=4 & opN=2 & opA & UnpackSR_opA & opB) ; Bank0Mem {
+    local oldCarry = zext(C_flag);
     setAddCarryFlags(opB, Bank0Mem);
     opA = opB + Bank0Mem + oldCarry;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
 :^Bank0Mem = opB + opA, "carry" is (op0=1 & op1=4 & opN=3 & opA & opB) ; Bank0Mem {
-    local oldCarry = zext($(C_flag));
+    local oldCarry = zext(C_flag);
     setAddCarryFlags(opB, opA);
     Bank0Mem = opB + opA + oldCarry;
     setResultFlags(Bank0Mem);
 }
 # r1 = r2 - 0x1234
-:^opA = opB - imm16 is (op0=2 & op1=4 & opN=1 & opA & opB) ; imm16 {
+:^opA = opB - imm16 is (op0=2 & op1=4 & opN=1 & opA & UnpackSR_opA & opB) ; imm16 {
     setSubtractFlags(opB, imm16);
     opA = opB - imm16;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA = opB - Bank0Mem is (op0=2 & op1=4 & opN=2 & opA & opB) ; Bank0Mem {
+:^opA = opB - Bank0Mem is (op0=2 & op1=4 & opN=2 & opA & UnpackSR_opA & opB) ; Bank0Mem {
     setSubtractFlags(opB, Bank0Mem);
     opA = opB - Bank0Mem;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
 :^Bank0Mem = opB - opA is (op0=2 & op1=4 & opN=3 & opA & opB) ; Bank0Mem {
@@ -948,20 +1046,22 @@ Bank0Mem: "0:"[imm16] is imm16 { export *:2 imm16; }
     setResultFlags(Bank0Mem);
 }
 # r1 = r2 - 0x1234, carry
-:^opA = opB - imm16, "carry" is (op0=3 & op1=4 & opN=1 & opA & opB) ; imm16 {
-    local oldCarry = zext($(C_flag));
+:^opA = opB - imm16, "carry" is (op0=3 & op1=4 & opN=1 & opA & UnpackSR_opA & opB) ; imm16 {
+    local oldCarry = zext(C_flag);
     setSubtractCarryFlags(opB, imm16);
     opA = opB - imm16 - ~oldCarry;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA = opB - Bank0Mem, "carry" is (op0=3 & op1=4 & opN=2 & opA & opB) ; Bank0Mem {
-    local oldCarry = zext($(C_flag));
+:^opA = opB - Bank0Mem, "carry" is (op0=3 & op1=4 & opN=2 & opA & UnpackSR_opA & opB) ; Bank0Mem {
+    local oldCarry = zext(C_flag);
     setSubtractCarryFlags(opB, Bank0Mem);
     opA = opB - Bank0Mem - ~oldCarry;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
 :^Bank0Mem = opB - opA, "carry" is (op0=3 & op1=4 & opN=3 & opA & opB) ; Bank0Mem {
-    local oldCarry = zext($(C_flag));
+    local oldCarry = zext(C_flag);
     setSubtractCarryFlags(opB, opA);
     Bank0Mem = opB - opA - ~oldCarry;
     setResultFlags(Bank0Mem);
@@ -978,84 +1078,95 @@ Bank0Mem: "0:"[imm16] is imm16 { export *:2 imm16; }
     setResultFlags(res);
 }
 # r1 = -0x1234
-:^opA = -imm16 is (op0=6 & op1=4 & opN=1 & opA) ; imm16 {
+:^opA = -imm16 is (op0=6 & op1=4 & opN=1 & opA & UnpackSR_opA) ; imm16 {
     opA = -imm16;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA = -Bank0Mem is (op0=6 & op1=4 & opN=2 & opA) ; Bank0Mem {
+:^opA = -Bank0Mem is (op0=6 & op1=4 & opN=2 & opA & UnpackSR_opA) ; Bank0Mem {
     opA = -Bank0Mem;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^Bank0Mem = -opA is (op0=6 & op1=4 & opN=3 & opA) ; Bank0Mem {
-    Bank0Mem = -opA;
+:^Bank0Mem = -opARead is (op0=6 & op1=4 & opN=3 & opARead) ; Bank0Mem {
+    Bank0Mem = -opARead;
     setResultFlags(Bank0Mem);
 }
 # r1 = r2 ^ 0x1234
-:^opA = opB "^" imm16 is (op0=8 & op1=4 & opN=1 & opA & opB) ; imm16 {
+:^opA = opB "^" imm16 is (op0=8 & op1=4 & opN=1 & opA & UnpackSR_opA & opB) ; imm16 {
     opA = opB ^ imm16;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA = opB "^" Bank0Mem is (op0=8 & op1=4 & opN=2 & opA & opB) ; Bank0Mem {
+:^opA = opB "^" Bank0Mem is (op0=8 & op1=4 & opN=2 & opA & UnpackSR_opA & opB) ; Bank0Mem {
     opA = opB ^ Bank0Mem;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^Bank0Mem = opB "^" opA is (op0=8 & op1=4 & opN=3 & opA & opB) ; Bank0Mem {
-    Bank0Mem = opB ^ opA;
+:^Bank0Mem = opB "^" opARead is (op0=8 & op1=4 & opN=3 & opARead & opB) ; Bank0Mem {
+    Bank0Mem = opB ^ opARead;
     setResultFlags(Bank0Mem);
 }
 # r1 = 0x1234
-:^opA = imm16 is (op0=9 & op1=4 & opN=1 & opA) ; imm16 {
+:^opA = imm16 is (op0=9 & op1=4 & opN=1 & opA & UnpackSR_opA) ; imm16 {
     opA = imm16;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^"pc" = imm16 is (op0=9 & op1=4 & opN=1 & opA=7) ; imm16 {
+:^"pc" = imm16 is (op0=9 & op1=4 & opN=1 & opA_v=7) ; imm16 {
 	local off:2 = imm16;
 	# inst_start is 8 bit byte, not word offset, need to load PC with word offset
 	local addr:3= ((inst_start >> 1) & 0xff0000) | zext(off);
     setResultFlags(off);
     goto [addr];
 }
-:^opA = Bank0Mem is (op0=9 & op1=4 & opN=2 & opA) ; Bank0Mem {
+:^opA = Bank0Mem is (op0=9 & op1=4 & opN=2 & opA & UnpackSR_opA) ; Bank0Mem {
     opA = Bank0Mem;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^Bank0Mem = opA is (op0=9 & op1=4 & opN=3 & opA) ; Bank0Mem {
-    Bank0Mem = opA;
+:^Bank0Mem = opARead is (op0=9 & op1=4 & opN=3 & opARead) ; Bank0Mem {
+    Bank0Mem = opARead;
     setResultFlags(Bank0Mem);
 }
 # r1 = r2 | 0x1234
-:^opA = opB | imm16 is (op0=0xa & op1=4 & opN=1 & opA & opB) ; imm16 {
+:^opA = opB | imm16 is (op0=0xa & op1=4 & opN=1 & opA & UnpackSR_opA & opB) ; imm16 {
     opA = opB | imm16;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA = opB | Bank0Mem is (op0=0xa & op1=4 & opN=2 & opA & opB) ; Bank0Mem {
+:^opA = opB | Bank0Mem is (op0=0xa & op1=4 & opN=2 & opA & UnpackSR_opA & opB) ; Bank0Mem {
     opA = opB | Bank0Mem;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^Bank0Mem = opB | opA is (op0=0xa & op1=4 & opN=3 & opA & opB) ; Bank0Mem {
-    Bank0Mem = opB | opA;
+:^Bank0Mem = opB | opARead is (op0=0xa & op1=4 & opN=3 & opARead & opB) ; Bank0Mem {
+    Bank0Mem = opB | opARead;
     setResultFlags(Bank0Mem);
 }
 # r1 = r2 & 0x1234
-:^opA = opB & imm16 is (op0=0xb & op1=4 & opN=1 & opA & opB) ; imm16 {
+:^opA = opB & imm16 is (op0=0xb & op1=4 & opN=1 & opA & UnpackSR_opA & opB) ; imm16 {
     opA = opB & imm16;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^opA = opB & Bank0Mem is (op0=0xb & op1=4 & opN=2 & opA & opB) ; Bank0Mem {
+:^opA = opB & Bank0Mem is (op0=0xb & op1=4 & opN=2 & opA & UnpackSR_opA & opB) ; Bank0Mem {
     opA = opB & Bank0Mem;
+    build UnpackSR_opA;
     setResultFlags(opA);
 }
-:^Bank0Mem = opB & opA is (op0=0xb & op1=4 & opN=3 & opA & opB) ; Bank0Mem {
-    Bank0Mem = opB & opA;
+:^Bank0Mem = opB & opARead is (op0=0xb & op1=4 & opN=3 & opARead & opB) ; Bank0Mem {
+    Bank0Mem = opB & opARead;
     setResultFlags(Bank0Mem);
 }
 # test r2, 0x1234
-:test opB, imm16 is (op0=0xc & op1=4 & opN=1 & opA & opB) ; imm16 {
-    local res = opB & imm16;
+# Note: xasm16 says using SR as source register is illegal
+:test opB_nosr, imm16 is (op0=0xc & op1=4 & opN=1 & opA & opB_nosr) ; imm16 {
+    local res = opB_nosr & imm16;
     setResultFlags(res);
 }
-:test opB, Bank0Mem is (op0=0xc & op1=4 & opN=2 & opA & opB) ; Bank0Mem {
-    local res = opB & Bank0Mem;
+:test opB_nosr, Bank0Mem is (op0=0xc & op1=4 & opN=2 & opA & opB_nosr) ; Bank0Mem {
+    local res = opB_nosr & Bank0Mem;
     setResultFlags(res);
 }
 # [0x1234] = r2
@@ -1071,56 +1182,56 @@ Bank0Mem: "0:"[imm16] is imm16 { export *:2 imm16; }
 # Revisit
 with : op1=5 & op0=0xf {
     :int "off" is opimm=0x00 {
-        $(irq) = 0;
-        $(fiq) = 0;
+        irq = 0;
+        fiq = 0;
     }
     :int "irq" is opimm=0x01 {
-        $(irq) = 1;
-        $(fiq) = 0;
+        irq = 1;
+        fiq = 0;
     }
     :int "fiq" is opimm=0x02 {
-        $(irq) = 0;
-        $(fiq) = 1;
+        irq = 0;
+        fiq = 1;
     }
     :int "fiq,irq" is opimm=0x03 {
-        $(irq) = 1;
-        $(fiq) = 1;
+        irq = 1;
+        fiq = 1;
     }
     :fir_mov "on" is opimm=0x04 {
-        $(fir_mov) = 0;
+        fir_mov = 0;
     }
     :fir_mov "off" is opimm=0x05 {
-        $(fir_mov) = 1;
+        fir_mov = 1;
     }
     :fraction "off" is opimm=0x06 {
-        $(fraction) = 0;
+        fraction = 0;
     }
     :fraction "on" is opimm=0x07 {
-        $(fraction) = 1;
+        fraction = 1;
     }
     :irq "off" is opimm=0x08 {
-        $(irq) = 0;
+        irq = 0;
     }
     :irq "on" is opimm=0x09 {
-        $(irq) = 1;
+        irq = 1;
     }
     :secbank "off" is opimm=0x0a {
-        $(sec_bank) = 0;
+        sec_bank = 0;
     }
     :secbank "on" is opimm=0x0b {
-        $(sec_bank) = 1;
+        sec_bank = 1;
     }
     :fiq "off" is opimm=0x0c {
-        $(fiq) = 0;
+        fiq = 0;
     }
     :irqnest "off" is opimm=0x0d {
-        $(irqnest) = 0;
+        irqnest = 0;
     }
     :fiq "on" is opimm=0x0e {
-        $(fiq) = 1;
+        fiq = 1;
     }
     :irqnest "on" is opimm=0x0f {
-        $(irqnest) = 1;
+        irqnest = 1;
     }
     :"break" is opimm=0x20 unimpl
     :"call mr" is opimm=0x21 {
@@ -1128,7 +1239,7 @@ with : op1=5 & op0=0xf {
         *:2 stack_addr = inst_next;
         sp = sp - 1;
 
-        # $(cs) = pc_full[16,6];
+        # cs = pc_full[16,6];
         stack_addr = segment(0:1, sp);
         *:2 stack_addr = sr;
         sp = sp - 1;
@@ -1149,40 +1260,43 @@ with : op1=5 & op0=0xf {
 # Extra Shifts
 with : op0=0xe & opE1=2 & opBitFlg=1 {
     # 1110|***|100|00|1|***
-    :^opA "asr" opB is opE2=0 & opA & opB {
-        opA = opA s>> opB;
+    :^opARead "asr" opB is opE2=0 & opARead & UnpackSR_opA & opB {
+        opARead = opARead s>> opB;
+        build UnpackSR_opA;
     }
     # 1110|***|100|10|1|***
-    :^opA "lsl" opB is opE2=2 & opA & opB {
-        opA = opA << opB;
+    :^opARead "lsl" opB is opE2=2 & opARead & UnpackSR_opA & opB {
+        opARead = opARead << opB;
+        build UnpackSR_opA;
     }
     # 1110|***|101|00|1|***
-    :^opA "lsr" opB is opE2=4 & opA & opB {
-        opA = opA >> opB;
+    :^opARead "lsr" opB is opE2=4 & opARead & UnpackSR_opA & opB {
+        opARead = opARead >> opB;
+        build UnpackSR_opA;
     }
     # 1110|***|100|01|1|***
-    :^"r3,r4" |= opA "asror" opB is opE2=1 & opA & opB {
+    :^"r3,r4" |= opARead "asror" opB is opE2=1 & opARead & opB {
         if(opB==0) goto inst_next;
-        local full:4 = sext(opA) << 16;
+        local full:4 = sext(opARead) << 16;
         full = full s>> opB;
         r3 = r3 | full:2;
-        r4 = opA s>> opB;
+        r4 = opARead s>> opB;
     }
     # 1110|***|10|01|11|***
     # Might change display
-    :^"r3,r4" |= opA "lslor" opB is opE2=3 & opA & opB {
+    :^"r3,r4" |= opARead "lslor" opB is opE2=3 & opARead & opB {
         if(opB==0) goto inst_next;
-        local full:4 = zext(opA) << opB;
+        local full:4 = zext(opARead) << opB;
         r4 = r4 | full(2);
-        r3 = opA << opB;
+        r3 = opARead << opB;
     }
     # 1110|***|10|10|11|***
-    :^"r3,r4" |= opA "lsror" opB is opE2=5 & opA & opB {
+    :^"r3,r4" |= opARead "lsror" opB is opE2=5 & opARead & opB {
         if(opB==0) goto inst_next;
-        local full:4 = zext(opA) << 16;
+        local full:4 = zext(opARead) << 16;
         full = full >> opB;
         r3 = r3 | full:2;
-        r4 = opA >> opB;
+        r4 = opARead >> opB;
     }
 }
 
@@ -1206,42 +1320,44 @@ with : op0=0xe & opE1=2 & opBitFlg=1 {
     r3 = res:2;
 }
 
+# TODO: inner product, division
+
 # Other
 # 1111|111|000|******
-:^"ds" = opimm is op0=0xf & op1=0 & opA=7 & opimm {
-    $(ds) = opimm;
+:^"ds" = opimm is op0=0xf & op1=0 & opA_v=7 & opimm {
+    ds = opimm;
 }
 # 1111|***|000|101|***
-:^"ds" = opB is op0=0xf & op1=0 & opA!=7 & opN=5 & opB {
-    $(ds) = opB;
+:^"ds" = opB_nosr is op0=0xf & op1=0 & opA_v!=7 & opN=5 & opB_nosr {
+    ds = opB_nosr[0,6];
 }
 # 1111|***|000|100|***
-:^opB = "ds" is op0=0xf & op1=0 & opA!=7 & opN=4 & opB {
-    opB = $(ds);
+:^opB_nosr = "ds" is op0=0xf & op1=0 & opA_v!=7 & opN=4 & opB_nosr {
+    opB_nosr = zext(ds[0,6]);
 }
 # 1111|***|000|111|***
-:^"fr" = opB is op0=0xf & op1=0 & opA!=7 & opN=7 & opB {
-    fr = opB;
+:^"fr" = opB_nosr is op0=0xf & op1=0 & opA_v!=7 & opN=7 & opB_nosr {
+    fr = opB_nosr;
 }
 # 1111|***|000|110|***
-:^opB = "fr" is op0=0xf & op1=0 & opA!=7 & opN=6 & opB {
-    opB = fr;
+:^opB_nosr = "fr" is op0=0xf & op1=0 & opA_v!=7 & opN=6 & opB_nosr {
+    opB_nosr = fr;
 }
 
 # Calls
-:call addr is op1=1 & op0=0xf & opimm ; imm16 [ addr=(opimm << 16) | imm16; ] {
-    push(inst_next);
+call_addr: addr is opimm & op1=1 & op0=0xf & PackSR; imm16 [ addr=(opimm << 16) | imm16; ] { export *[ram]:3 addr; }
 
-    # $(cs) = pc_full[16,6];
+:call call_addr is call_addr {
+    push(inst_next);
     push(sr);
 
-    local addr_s:3 = addr;
-    call [addr_s];
+    call call_addr;
 }
 
-:goto addr is op1=2 & op0=0xf & opimm ; imm16 [ addr=(opimm << 16) | imm16; ] {
-    local addr_s:3 = addr;
-    goto [addr_s];
+goto_addr: addr is op1=2 & op0=0xf & opimm ; imm16 [ addr=(opimm << 16) | imm16; ] { export *[ram]:3 addr; } 
+
+:goto goto_addr is goto_addr {
+    goto goto_addr;
 }
 
 :goto "mr" is op1=3 & op0=0xf {
@@ -1256,30 +1372,30 @@ with : op0=0xe & opE1=2 & opBitFlg=1 {
     opA_p = *:2 stack_addr;
 }
 # pop pc, sr from [sp]
-:retf is op1=2 & op0=9 & opA=5 & opN=2 & opB=0 {
+:retf is op1=2 & op0=9 & opA_v=5 & opN=2 & opB_v=0 & UnpackSR {
     sp = sp + 1;
     local stack_addr:3 = segment(0:1, sp);
     sr = *:2 stack_addr;
-    local cs_high:1 = $(cs);
+    build UnpackSR;
     sp = sp + 1;
     stack_addr = segment(0:1, sp);
     local pc_low:2 = *:2 stack_addr;
-    local addr:3 = segment(cs_high, pc_low);
+    local addr:3 = segment(cs, pc_low);
     return [addr];
 }
 
-:pop "pc, bp from" ["sp"] is op1=2 & op0=9 & opA=4 & opN=3 & opB=0 {
+:pop "pc", "bp" "from" ["sp"] is op1=2 & op0=9 & opA_v=4 & opN=3 & opB_v=0 & UnpackSR {
     sp = sp + 1;
     local stack_addr:3 = segment(0:1, sp);
     bp = *:2 stack_addr;
     sp = sp + 1;
     stack_addr = segment(0:1, sp);
     sr = *:2 stack_addr;
-    local cs_high:1 = $(cs);
+    build UnpackSR;
     sp = sp + 1;
     stack_addr = segment(0:1, sp);
     local pc_low:2 = *:2 stack_addr;
-    local addr:3 = segment(cs_high, pc_low);
+    local addr:3 = segment(cs, pc_low);
     return [addr];
 }
 
@@ -1299,3 +1415,10 @@ with : op0=0xe & opE1=2 & opBitFlg=1 {
     # TODO
     sp = sp - opN;
 }
+
+# u'nSP 2.0 extended instructions
+#:^instruction is isExtended=0 & opFull=0xff80 & instruction [ isExtended=1; ] { }
+#
+#with : isExtended=1 {
+#    # TODO
+#}
