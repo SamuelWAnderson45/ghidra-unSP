@@ -1241,16 +1241,10 @@ with : op1=5 & op0=0xf {
     }
     :"break" is opimm=0x20 unimpl
     :"call mr" is opimm=0x21 {
-        local stack_addr:3 = segment(0:1, sp);
-        *:2 stack_addr = inst_next;
-        sp = sp - 1;
+        push(pc);
+        push(sr);
 
-        # cs = pc_full[16,6];
-        stack_addr = segment(0:1, sp);
-        *:2 stack_addr = sr;
-        sp = sp - 1;
-
-        local addr:3 = segment(r4 & 0x34, r3);
+        local addr:3 = segment(r4 & 0x3f, r3);
         call [addr];
     }
     :^"r2 =" "exp" "r4" is opimm=0x24 {
@@ -1335,11 +1329,11 @@ with : op0=0xe & opE1=2 & opBitFlg=1 {
 }
 # 1111|***|000|101|***
 :^"ds" = opB_nosr is op0=0xf & op1=0 & opA_v!=7 & opN=5 & opB_nosr {
-    ds = opB_nosr[0,6];
+    ds = opB_nosr:1 & 0x3f;
 }
 # 1111|***|000|100|***
 :^opB_nosr = "ds" is op0=0xf & op1=0 & opA_v!=7 & opN=4 & opB_nosr {
-    opB_nosr = zext(ds[0,6]);
+    opB_nosr = zext(ds & 0x3f);
 }
 # 1111|***|000|111|***
 :^"fr" = opB_nosr is op0=0xf & op1=0 & opA_v!=7 & opN=7 & opB_nosr {
@@ -1351,7 +1345,7 @@ with : op0=0xe & opE1=2 & opBitFlg=1 {
 }
 
 # Calls
-call_addr: addr is opimm & op1=1 & op0=0xf & PackSR; imm16 [ addr=(opimm << 16) | imm16; ] { export *[ram]:3 addr; }
+call_addr: addr is opimm & op1=1 & op0=0xf; imm16 [ addr=(opimm << 16) | imm16; ] { export *[ram]:3 addr; }
 
 :call call_addr is call_addr {
     push(inst_next);
