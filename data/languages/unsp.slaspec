@@ -175,89 +175,27 @@ RelP6:   relAddr is opimm [ relAddr=(inst_start & 0x3f0000) + ((inst_next+opimm)
 # Negative jump with 6bit immediate
 RelN6:   relAddr is opimm [ relAddr=(inst_start & 0x3f0000) + ((inst_next-opimm) & 0xffff); ] { export *:3 relAddr; }
 
-:jb RelP6 is opA_v=7 & op0=0 & op1=0 & RelP6 {
-    if(!C_flag) goto RelP6;
+# Conditions
+cc: "b"  is op0=0x0     { local tmp = !C_flag; export tmp; }
+cc: "ae" is op0=0x1     { export C_flag; }
+cc: "ge" is op0=0x2     { local tmp = !S_flag; export tmp; }
+cc: "l"  is op0=0x3     { export S_flag; }
+cc: "ne" is op0=0x4     { local tmp = !Z_flag; export tmp; }
+cc: "e"  is op0=0x5     { export Z_flag; }
+cc: "pl" is op0=0x6     { local tmp = !N_flag; export tmp; }
+cc: "mi" is op0=0x7     { export N_flag; }
+cc: "be" is op0=0x8     { local tmp = Z_flag || !C_flag; export tmp; }
+cc: "a"  is op0=0x9     { local tmp = !Z_flag && C_flag; export tmp; }
+cc: "le" is op0=0xa     { local tmp = Z_flag || S_flag; export tmp; }
+cc: "g"  is op0=0xb     { local tmp = !Z_flag && !S_flag; export tmp; }
+cc: "vc" is op0=0xc     { local tmp = N_flag == S_flag; export tmp; }
+cc: "vs" is op0=0xd     { local tmp = N_flag != S_flag; export tmp; }
+
+:j^cc RelP6 is opA_v=7 & cc & op1=0 & RelP6 {
+    if(cc) goto RelP6;
 }
-:jb RelN6 is opA_v=7 & op0=0 & op1=1 & RelN6 {
-    if(!C_flag) goto RelN6;
-}
-:jae RelP6 is opA_v=7 & op0=1 & op1=0 & RelP6 {
-    if(C_flag) goto RelP6;
-}
-:jae RelN6 is opA_v=7 & op0=1 & op1=1 & RelN6 {
-    if(C_flag) goto RelN6;
-}
-:jge RelP6 is opA_v=7 & op0=2 & op1=0 & RelP6 {
-    if(!S_flag) goto RelP6;
-}
-:jge RelN6 is opA_v=7 & op0=2 & op1=1 & RelN6 {
-    if(!S_flag) goto RelN6;
-}
-:jl RelP6 is opA_v=7 & op0=3 & op1=0 & RelP6 {
-    if(S_flag) goto RelP6;
-}
-:jl RelN6 is opA_v=7 & op0=3 & op1=1 & RelN6 {
-    if(S_flag) goto RelN6;
-}
-:jne RelP6 is opA_v=7 & op0=4 & op1=0 & RelP6 {
-    if(!Z_flag) goto RelP6;
-}
-:jne RelN6 is opA_v=7 & op0=4 & op1=1 & RelN6 {
-    if(!Z_flag) goto RelN6;
-}
-:je RelP6 is opA_v=7 & op0=5 & op1=0 & RelP6 {
-    if(Z_flag) goto RelP6;
-}
-:je RelN6 is opA_v=7 & op0=5 & op1=1 & RelN6 {
-    if(Z_flag) goto RelN6;
-}
-:jpl RelP6 is opA_v=7 & op0=6 & op1=0 & RelP6 {
-    if(!N_flag) goto RelP6;
-}
-:jpl RelN6 is opA_v=7 & op0=6 & op1=1 & RelN6 {
-    if(!N_flag) goto RelN6;
-}
-:jmi RelP6 is opA_v=7 & op0=7 & op1=0 & RelP6 {
-    if(N_flag) goto RelP6;
-}
-:jmi RelN6 is opA_v=7 & op0=7 & op1=1 & RelN6 {
-    if(N_flag) goto RelN6;
-}
-:jbe RelP6 is opA_v=7 & op0=8 & op1=0 & RelP6 {
-    if(Z_flag || !C_flag) goto RelP6;
-}
-:jbe RelN6 is opA_v=7 & op0=8 & op1=1 & RelN6 {
-    if(Z_flag || !C_flag) goto RelN6;
-}
-:ja RelP6 is opA_v=7 & op0=9 & op1=0 & RelP6 {
-    if(!Z_flag && C_flag) goto RelP6;
-}
-:ja RelN6 is opA_v=7 & op0=9 & op1=1 & RelN6 {
-    if(!Z_flag && C_flag) goto RelN6;
-}
-:jle RelP6 is opA_v=7 & op0=0xa & op1=0 & RelP6 {
-    if(Z_flag || S_flag) goto RelP6;
-}
-:jle RelN6 is opA_v=7 & op0=0xa & op1=1 & RelN6 {
-    if(Z_flag || S_flag) goto RelN6;
-}
-:jg RelP6 is opA_v=7 & op0=0xb & op1=0 & RelP6 {
-    if(!Z_flag && !S_flag) goto RelP6;
-}
-:jg RelN6 is opA_v=7 & op0=0xb & op1=1 & RelN6 {
-    if(!Z_flag && !S_flag) goto RelN6;
-}
-:jvc RelP6 is opA_v=7 & op0=0xc & op1=0 & RelP6 {
-    if(N_flag == S_flag) goto RelP6;
-}
-:jvc RelN6 is opA_v=7 & op0=0xc & op1=1 & RelN6 {
-    if(N_flag == S_flag) goto RelN6;
-}
-:jvs RelP6 is opA_v=7 & op0=0xd & op1=0 & RelP6 {
-    if(N_flag != S_flag) goto RelP6;
-}
-:jvs RelN6 is opA_v=7 & op0=0xd & op1=1 & RelN6 {
-    if(N_flag != S_flag) goto RelN6;
+:j^cc RelN6 is opA_v=7 & cc & op1=1 & RelN6 {
+    if(cc) goto RelN6;
 }
 :jmp RelP6 is opA_v=7 & op0=0xe & op1=0 & RelP6 {
     goto RelP6;
