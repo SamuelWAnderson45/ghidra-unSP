@@ -148,21 +148,49 @@ macro setResultFlags(reg) {
     N_flag = (reg s< 0);
 }
 
+# Following adapted from x86 processor
+# Must be called after setResultFlags() due to dependence on N_flag
+
+# I have no idea how the sign flag is actually supposed to be calculated,
+# but according to the u'nSP programmer's guide overflow occurs when N and S
+# are different, so let's set per overflow
+
 macro setAddFlags(op1,op2) {
-    C_flag = carry(op1,op2);
+    local of = scarry(op1, op2);
+    C_flag = carry(op1, op2);
+    S_flag = of ^^ N_flag;
 }
 
 macro setAddCarryFlags(op1,op2) {
-    C_flag = (carry(op1,zext(C_flag)) || carry(op2,op1 + zext(C_flag)));
+	local CFcopy = zext(C_flag);
+	local cf = carry(op1, op2);
+    local of = scarry(op1, op2);
+    local result = op1 + op2;
+	cf = cf || carry(result, CFcopy);
+    of = of ^^ scarry(result, CFcopy);
+    C_flag = cf;
+	S_flag = of ^^ N_flag;
 }
 
 macro setSubtractFlags(op1,op2) {
-    S_flag = (op1 < op2);
+    local of = sborrow(op1, op2);
+    C_flag = carry(op1, ~op2);
+	S_flag = of ^^ N_flag;
 }
 
 macro setSubtractCarryFlags(op1,op2) {
-    local notC = !C_flag;
-    S_flag = ((op1 < zext(notC)) || ((op1 - zext(notC)) < op2));
+	local CFcopy = C_flag;
+    # For carry, use original `a + ~b + C`
+    # For borrow, use `a - b - !C`
+	local cf = carry(op1, ~op2);
+    local of = sborrow(op1, op2);
+    # Operation before carry is `op1 + ~op2`
+	local result = op1 - op2;
+    # a - b == a + ~b + 1, need to remove the 1
+	cf = cf || carry(result - 1, zext(CFcopy));
+    of = of ^^ sborrow(result, zext(!CFcopy));
+    C_flag = cf;
+	S_flag = of ^^ N_flag;
 }
 
 # Instructions
@@ -312,261 +340,279 @@ ALU6DstStack: ""["bp"+opimm] is op1=0 & opimm {
     export *:2 stack_addr;
 }
 
+# TODO: do not set flags if destination is PC
+
 # r1 += 7
 :^opA += ALU6BaseDisplacement is op0=0 & op1=0 & opA & UnpackSR_opA & ALU6BaseDisplacement {
-    setAddFlags(opA, ALU6BaseDisplacement);
+    local origOpA:2 = opA;
     opA = opA + ALU6BaseDisplacement;
     build UnpackSR_opA;
     setResultFlags(opA);
+    setAddFlags(origOpA, ALU6BaseDisplacement);
 }
 :^opA += ALU6Opimm is op0=0 & op1=1 & opA & UnpackSR_opA & ALU6Opimm {
-    setAddFlags(opA, ALU6Opimm);
+    local origOpA:2 = opA;
     opA = opA + ALU6Opimm;
     build UnpackSR_opA;
     setResultFlags(opA);
+    setAddFlags(origOpA, ALU6Opimm);
 }
 :^opA += IndirectOp is op0=0 & op1=3 & opA & UnpackSR_opA & IndirectOp {
-    setAddFlags(opA, IndirectOp);
+    local origOpA:2 = opA;
     opA = opA + IndirectOp;
     build UnpackSR_opA;
     setResultFlags(opA);
+    setAddFlags(origOpA, IndirectOp);
 }
 :^opA += ALU6Reg is op0=0 & op1=4 & opN=0 & opA & UnpackSR_opA & ALU6Reg {
-    setAddFlags(opA, ALU6Reg);
+    local origOpA:2 = opA;
     opA = opA + ALU6Reg;
     build UnpackSR_opA;
     setResultFlags(opA);
+    setAddFlags(origOpA, ALU6Reg);
 }
 :^opA += ALU6RShift is op0=0 & op1=4 & opFlag=1 & opA & UnpackSR_opA & ALU6RShift {
-    setAddFlags(opA, ALU6RShift);
+    local origOpA:2 = opA;
     opA = opA + ALU6RShift;
     build UnpackSR_opA;
     setResultFlags(opA);
+    setAddFlags(origOpA, ALU6RShift);
 }
 :^opA += ALU6LShift is op0=0 & op1=5 & opA & UnpackSR_opA & ALU6LShift {
-    setAddFlags(opA, ALU6LShift);
+    local origOpA:2 = opA;
     opA = opA + ALU6LShift;
     build UnpackSR_opA;
     setResultFlags(opA);
+    setAddFlags(origOpA, ALU6LShift);
 }
 :^opA += ALU6RotShift is op0=0 & op1=6 & opA & UnpackSR_opA & ALU6RotShift {
-    setAddFlags(opA, ALU6RotShift);
+    local origOpA:2 = opA;
     opA = opA + ALU6RotShift;
     build UnpackSR_opA;
     setResultFlags(opA);
+    setAddFlags(origOpA, ALU6RotShift);
 }
 :^opA += ALU6Mem is op0=0 & op1=7 & opA & UnpackSR_opA & ALU6Mem {
-    setAddFlags(opA, ALU6Mem);
+    local origOpA:2 = opA;
     opA = opA + ALU6Mem;
     build UnpackSR_opA;
     setResultFlags(opA);
+    setAddFlags(origOpA, ALU6Mem);
 }
 
 # r1 += 7, carry
 :^opA += ALU6BaseDisplacement, "carry" is op0=1 & op1=0 & opA & UnpackSR_opA & ALU6BaseDisplacement {
-    local oldCarry = zext(C_flag);
-    setAddCarryFlags(opA, ALU6BaseDisplacement);
-    opA = opA + ALU6BaseDisplacement + oldCarry;
+    local origOpA:2 = opA;
+    opA = opA + ALU6BaseDisplacement + zext(C_flag);
     build UnpackSR_opA;
     setResultFlags(opA);
+    setAddCarryFlags(origOpA, ALU6BaseDisplacement);
 }
 :^opA += ALU6Opimm, "carry" is op0=1 & op1=1 & opA & UnpackSR_opA & ALU6Opimm {
-    local oldCarry = zext(C_flag);
-    setAddCarryFlags(opA, ALU6Opimm);
-    opA = opA + ALU6Opimm + oldCarry;
+    local origOpA:2 = opA;
+    opA = opA + ALU6Opimm + zext(C_flag);
     build UnpackSR_opA;
     setResultFlags(opA);
+    setAddCarryFlags(origOpA, ALU6Opimm);
 }
 :^opA += IndirectOp, "carry" is op0=1 & op1=3 & opA & UnpackSR_opA & IndirectOp {
-    local oldCarry = zext(C_flag);
-    setAddCarryFlags(opA, IndirectOp);
-    opA = opA + IndirectOp + oldCarry;
+    local origOpA:2 = opA;
+    opA = opA + IndirectOp + zext(C_flag);
     build UnpackSR_opA;
     setResultFlags(opA);
+    setAddCarryFlags(origOpA, IndirectOp);
 }
 :^opA += ALU6Reg, "carry" is op0=1 & op1=4 & opN=0 & opA & UnpackSR_opA & ALU6Reg {
-    local oldCarry = zext(C_flag);
-    setAddCarryFlags(opA, ALU6Reg);
-    opA = opA + ALU6Reg + oldCarry;
+    local origOpA:2 = opA;
+    opA = opA + ALU6Reg + zext(C_flag);
     build UnpackSR_opA;
     setResultFlags(opA);
+    setAddCarryFlags(origOpA, ALU6Reg);
 }
 :^opA += ALU6RShift, "carry" is op0=1 & op1=4 & opFlag=1 & opA & UnpackSR_opA & ALU6RShift {
-    local oldCarry = zext(C_flag);
-    setAddCarryFlags(opA, ALU6RShift);
-    opA = opA + ALU6RShift + oldCarry;
+    local origOpA:2 = opA;
+    opA = opA + ALU6RShift + zext(C_flag);
     build UnpackSR_opA;
     setResultFlags(opA);
+    setAddCarryFlags(origOpA, ALU6RShift);
 }
 :^opA += ALU6LShift, "carry" is op0=1 & op1=5 & opA & UnpackSR_opA & ALU6LShift {
-    local oldCarry = zext(C_flag);
-    setAddCarryFlags(opA, ALU6LShift);
-    opA = opA + ALU6LShift + oldCarry;
+    local origOpA:2 = opA;
+    opA = opA + ALU6LShift + zext(C_flag);
     build UnpackSR_opA;
     setResultFlags(opA);
+    setAddCarryFlags(origOpA, ALU6LShift);
 }
 :^opA += ALU6RotShift, "carry" is op0=1 & op1=6 & opA & UnpackSR_opA & ALU6RotShift {
-    local oldCarry = zext(C_flag);
-    setAddCarryFlags(opA, ALU6RotShift);
-    opA = opA + ALU6RotShift + oldCarry;
+    local origOpA:2 = opA;
+    opA = opA + ALU6RotShift + zext(C_flag);
     build UnpackSR_opA;
     setResultFlags(opA);
+    setAddCarryFlags(origOpA, ALU6RotShift);
 }
 :^opA += ALU6Mem, "carry" is op0=1 & op1=7 & opA & UnpackSR_opA & ALU6Mem {
-    local oldCarry = zext(C_flag);
-    setAddCarryFlags(opA, ALU6Mem);
-    opA = opA + ALU6Mem + oldCarry;
+    local origOpA:2 = opA;
+    opA = opA + ALU6Mem + zext(C_flag);
     build UnpackSR_opA;
     setResultFlags(opA);
+    setAddCarryFlags(origOpA, ALU6Mem);
 }
 
 # r1 -= 7
 :^opA -= ALU6BaseDisplacement is op0=2 & op1=0 & opA & UnpackSR_opA & ALU6BaseDisplacement  {
-    setSubtractFlags(opA, ALU6BaseDisplacement);
+    local origOpA:2 = opA;
     opA = opA - ALU6BaseDisplacement;
     build UnpackSR_opA;
     setResultFlags(opA);
+    setSubtractFlags(origOpA, ALU6BaseDisplacement);
 }
 :^opA -= ALU6Opimm is op0=2 & op1=1 & opA & UnpackSR_opA & ALU6Opimm  {
-    setSubtractFlags(opA, ALU6Opimm);
+    local origOpA:2 = opA;
     opA = opA - ALU6Opimm;
     build UnpackSR_opA;
     setResultFlags(opA);
+    setSubtractFlags(origOpA, ALU6Opimm);
 }
 :^opA -= IndirectOp is op0=2 & op1=3 & opA & UnpackSR_opA & IndirectOp  {
-    setSubtractFlags(opA, IndirectOp);
+    local origOpA:2 = opA;
     opA = opA - IndirectOp;
     build UnpackSR_opA;
     setResultFlags(opA);
+    setSubtractFlags(origOpA, IndirectOp);
 }
 :^opA -= ALU6Reg is op0=2 & op1=4 & opN=0 & opA & UnpackSR_opA & ALU6Reg  {
-    setSubtractFlags(opA, ALU6Reg);
+    local origOpA:2 = opA;
     opA = opA - ALU6Reg;
     build UnpackSR_opA;
     setResultFlags(opA);
+    setSubtractFlags(origOpA, ALU6Reg);
 }
 :^opA -= ALU6RShift is op0=2 & op1=4 & opFlag=1 & opA & UnpackSR_opA & ALU6RShift  {
-    setSubtractFlags(opA, ALU6RShift);
+    local origOpA:2 = opA;
     opA = opA - ALU6RShift;
     build UnpackSR_opA;
     setResultFlags(opA);
+    setSubtractFlags(origOpA, ALU6RShift);
 }
 :^opA -= ALU6LShift is op0=2 & op1=5 & opA & UnpackSR_opA & ALU6LShift  {
-    setSubtractFlags(opA, ALU6LShift);
+    local origOpA:2 = opA;
     opA = opA - ALU6LShift;
     build UnpackSR_opA;
     setResultFlags(opA);
+    setSubtractFlags(origOpA, ALU6LShift);
 }
 :^opA -= ALU6RotShift is op0=2 & op1=6 & opA & UnpackSR_opA & ALU6RotShift  {
-    setSubtractFlags(opA, ALU6RotShift);
+    local origOpA:2 = opA;
     opA = opA - ALU6RotShift;
     build UnpackSR_opA;
     setResultFlags(opA);
+    setSubtractFlags(origOpA, ALU6RotShift);
 }
 :^opA -= ALU6Mem is op0=2 & op1=7 & opA & UnpackSR_opA & ALU6Mem  {
-    setSubtractFlags(opA, ALU6Mem);
+    local origOpA:2 = opA;
     opA = opA - ALU6Mem;
     build UnpackSR_opA;
     setResultFlags(opA);
+    setSubtractFlags(origOpA, ALU6Mem);
 }
 # r1 -= 7, carry
 :^opA -= ALU6BaseDisplacement, "carry" is op0=3 & op1=0 & opA & UnpackSR_opA & ALU6BaseDisplacement  {
-    local oldCarry = zext(C_flag);
-    setSubtractCarryFlags(opA, ALU6BaseDisplacement);
-    opA = opA - ALU6BaseDisplacement - ~oldCarry;
+    local origOpA:2 = opA;
+    opA = opA - ALU6BaseDisplacement - zext(!C_flag);
     build UnpackSR_opA;
     setResultFlags(opA);
+    setSubtractCarryFlags(origOpA, ALU6BaseDisplacement);
 }
 :^opA -= ALU6Opimm, "carry" is op0=3 & op1=1 & opA & UnpackSR_opA & ALU6Opimm  {
-    local oldCarry = zext(C_flag);
-    setSubtractCarryFlags(opA, ALU6Opimm);
-    opA = opA - ALU6Opimm - ~oldCarry;
+    local origOpA:2 = opA;
+    opA = opA - ALU6Opimm - zext(!C_flag);
     build UnpackSR_opA;
     setResultFlags(opA);
+    setSubtractCarryFlags(origOpA, ALU6Opimm);
 }
 :^opA -= IndirectOp, "carry" is op0=3 & op1=3 & opA & UnpackSR_opA & IndirectOp  {
-    local oldCarry = zext(C_flag);
-    setSubtractCarryFlags(opA, IndirectOp);
-    opA = opA - IndirectOp - ~oldCarry;
+    local origOpA:2 = opA;
+    opA = opA - IndirectOp - zext(!C_flag);
     build UnpackSR_opA;
     setResultFlags(opA);
+    setSubtractCarryFlags(origOpA, IndirectOp);
 }
 :^opA -= ALU6Reg, "carry" is op0=3 & op1=4 & opN=0 & opA & UnpackSR_opA & ALU6Reg  {
-    local oldCarry = zext(C_flag);
-    setSubtractCarryFlags(opA, ALU6Reg);
-    opA = opA - ALU6Reg - ~oldCarry;
+    local origOpA:2 = opA;
+    opA = opA - ALU6Reg - zext(!C_flag);
     build UnpackSR_opA;
     setResultFlags(opA);
+    setSubtractCarryFlags(origOpA, ALU6Reg);
 }
 :^opA -= ALU6RShift, "carry" is op0=3 & op1=4 & opFlag=1 & opA & UnpackSR_opA & ALU6RShift  {
-    local oldCarry = zext(C_flag);
-    setSubtractCarryFlags(opA, ALU6RShift);
-    opA = opA - ALU6RShift - ~oldCarry;
+    local origOpA:2 = opA;
+    opA = opA - ALU6RShift - zext(!C_flag);
     build UnpackSR_opA;
     setResultFlags(opA);
+    setSubtractCarryFlags(origOpA, ALU6RShift);
 }
 :^opA -= ALU6LShift, "carry" is op0=3 & op1=5 & opA & UnpackSR_opA & ALU6LShift  {
-    local oldCarry = zext(C_flag);
-    setSubtractCarryFlags(opA, ALU6LShift);
-    opA = opA - ALU6LShift - ~oldCarry;
+    local origOpA:2 = opA;
+    opA = opA - ALU6LShift - zext(!C_flag);
     build UnpackSR_opA;
     setResultFlags(opA);
+    setSubtractCarryFlags(origOpA, ALU6LShift);
 }
 :^opA -= ALU6RotShift, "carry" is op0=3 & op1=6 & opA & UnpackSR_opA & ALU6RotShift  {
-    local oldCarry = zext(C_flag);
-    setSubtractCarryFlags(opA, ALU6RotShift);
-    opA = opA - ALU6RotShift - ~oldCarry;
+    local origOpA:2 = opA;
+    opA = opA - ALU6RotShift - zext(!C_flag);
     build UnpackSR_opA;
     setResultFlags(opA);
+    setSubtractCarryFlags(origOpA, ALU6RotShift);
 }
 :^opA -= ALU6Mem, "carry" is op0=3 & op1=7 & opA & UnpackSR_opA & ALU6Mem  {
-    local oldCarry = zext(C_flag);
-    setSubtractCarryFlags(opA, ALU6Mem);
-    opA = opA - ALU6Mem - ~oldCarry;
+    local origOpA:2 = opA;
+    opA = opA - ALU6Mem - zext(!C_flag);
     build UnpackSR_opA;
     setResultFlags(opA);
+    setSubtractCarryFlags(origOpA, ALU6Mem);
 }
 
 # cmp r1, 7
 :cmp opARead, ALU6BaseDisplacement is op0=4 & op1=0 & opARead & ALU6BaseDisplacement  {
-    setSubtractCarryFlags(opARead, ALU6BaseDisplacement);
     local res = opARead - ALU6BaseDisplacement;
     setResultFlags(res);
+    setSubtractFlags(opARead, ALU6BaseDisplacement);
 }
 :cmp opARead, ALU6Opimm is op0=4 & op1=1 & opARead & ALU6Opimm  {
-    setSubtractCarryFlags(opARead, ALU6Opimm);
     local res = opARead - ALU6Opimm;
     setResultFlags(res);
+    setSubtractFlags(opARead, ALU6Opimm);
 }
 :cmp opARead, IndirectOp is op0=4 & op1=3 & opARead & IndirectOp  {
-    setSubtractCarryFlags(opARead, IndirectOp);
     local res = opARead - IndirectOp;
     setResultFlags(res);
+    setSubtractFlags(opARead, IndirectOp);
 }
 :cmp opARead, ALU6Reg is op0=4 & op1=4 & opN=0 & opARead & ALU6Reg  {
-    setSubtractCarryFlags(opARead, ALU6Reg);
     local res = opARead - ALU6Reg;
     setResultFlags(res);
+    setSubtractFlags(opARead, ALU6Reg);
 }
 :cmp opARead, ALU6RShift is op0=4 & op1=4 & opFlag=1 & opARead & ALU6RShift  {
-    setSubtractCarryFlags(opARead, ALU6RShift);
     local res = opARead - ALU6RShift;
     setResultFlags(res);
+    setSubtractFlags(opARead, ALU6RShift);
 }
 :cmp opARead, ALU6LShift is op0=4 & op1=5 & opARead & ALU6LShift  {
-    setSubtractCarryFlags(opARead, ALU6LShift);
     local res = opARead - ALU6LShift;
     setResultFlags(res);
+    setSubtractFlags(opARead, ALU6LShift);
 }
 :cmp opARead, ALU6RotShift is op0=4 & op1=6 & opARead & ALU6RotShift  {
-    setSubtractCarryFlags(opARead, ALU6RotShift);
     local res = opARead - ALU6RotShift;
     setResultFlags(res);
+    setSubtractFlags(opARead, ALU6RotShift);
 }
 :cmp opARead, ALU6Mem is op0=4 & op1=7 & opARead & ALU6Mem  {
-    setSubtractCarryFlags(opARead, ALU6Mem);
     local res = opARead - ALU6Mem;
     setResultFlags(res);
+    setSubtractFlags(opARead, ALU6Mem);
 } 
 # r1 = -7
 :^opA = -ALU6BaseDisplacement is op0=6 & op1=0 & opA & UnpackSR_opA & ALU6BaseDisplacement  {
@@ -934,92 +980,86 @@ Bank0Mem: ""[imm16] is imm16 { export *:2 imm16; }
 # like [0x1234] = r2 + [0x1234]
 # It won't crash or produce invalid machine code. Merely a UX problem
 :^opA = opB + imm16 is (op0=0 & op1=4 & opN=1 & opA & UnpackSR_opA & opB) ; imm16 {
-	setAddFlags(opB, imm16);
 	opA = opB + imm16;
     build UnpackSR_opA;
 	setResultFlags(opA);
+	setAddFlags(opB, imm16);
 }
 :^opA = opB + Bank0Mem is (op0=0 & op1=4 & opN=2 & opA & UnpackSR_opA & opB) ; Bank0Mem {
-	setAddFlags(opB, Bank0Mem);
 	opA = opB + Bank0Mem;
     build UnpackSR_opA;
 	setResultFlags(opA);
+	setAddFlags(opB, Bank0Mem);
 }
 :^Bank0Mem = opB + opA is (op0=0 & op1=4 & opN=3 & opA & opB) ; Bank0Mem {
-	setAddFlags(opB, opA);
 	Bank0Mem = opB + opA;
 	setResultFlags(Bank0Mem);
+	setAddFlags(opB, opA);
 }
 # r1 = r2 + 0x1234, carry
 :^opA = opB + imm16, "carry" is (op0=1 & op1=4 & opN=1 & opA & UnpackSR_opA & opB) ; imm16 {
-    local oldCarry = zext(C_flag);
-    setAddCarryFlags(opB, imm16);
-    opA = opB + imm16 + oldCarry;
+    opA = opB + imm16 + zext(C_flag);
     build UnpackSR_opA;
     setResultFlags(opA);
+    setAddCarryFlags(opB, imm16);
 }
 :^opA = opB + Bank0Mem, "carry" is (op0=1 & op1=4 & opN=2 & opA & UnpackSR_opA & opB) ; Bank0Mem {
-    local oldCarry = zext(C_flag);
-    setAddCarryFlags(opB, Bank0Mem);
-    opA = opB + Bank0Mem + oldCarry;
+    opA = opB + Bank0Mem + zext(C_flag);
     build UnpackSR_opA;
     setResultFlags(opA);
+    setAddCarryFlags(opB, Bank0Mem);
 }
 :^Bank0Mem = opB + opA, "carry" is (op0=1 & op1=4 & opN=3 & opA & opB) ; Bank0Mem {
-    local oldCarry = zext(C_flag);
-    setAddCarryFlags(opB, opA);
-    Bank0Mem = opB + opA + oldCarry;
+    Bank0Mem = opB + opA + zext(C_flag);
     setResultFlags(Bank0Mem);
+    setAddCarryFlags(opB, opA);
 }
 # r1 = r2 - 0x1234
 :^opA = opB - imm16 is (op0=2 & op1=4 & opN=1 & opA & UnpackSR_opA & opB) ; imm16 {
-    setSubtractFlags(opB, imm16);
     opA = opB - imm16;
     build UnpackSR_opA;
     setResultFlags(opA);
+    setSubtractFlags(opB, imm16);
 }
 :^opA = opB - Bank0Mem is (op0=2 & op1=4 & opN=2 & opA & UnpackSR_opA & opB) ; Bank0Mem {
-    setSubtractFlags(opB, Bank0Mem);
     opA = opB - Bank0Mem;
     build UnpackSR_opA;
     setResultFlags(opA);
+    setSubtractFlags(opB, Bank0Mem);
 }
 :^Bank0Mem = opB - opA is (op0=2 & op1=4 & opN=3 & opA & opB) ; Bank0Mem {
-    setSubtractFlags(opB, opA);
     Bank0Mem = opB - opA;
     setResultFlags(Bank0Mem);
+    setSubtractFlags(opB, opA);
 }
 # r1 = r2 - 0x1234, carry
 :^opA = opB - imm16, "carry" is (op0=3 & op1=4 & opN=1 & opA & UnpackSR_opA & opB) ; imm16 {
-    local oldCarry = zext(C_flag);
-    setSubtractCarryFlags(opB, imm16);
-    opA = opB - imm16 - ~oldCarry;
+    opA = opB - imm16 - zext(!C_flag);
     build UnpackSR_opA;
     setResultFlags(opA);
+    setSubtractCarryFlags(opB, imm16);
 }
 :^opA = opB - Bank0Mem, "carry" is (op0=3 & op1=4 & opN=2 & opA & UnpackSR_opA & opB) ; Bank0Mem {
-    local oldCarry = zext(C_flag);
-    setSubtractCarryFlags(opB, Bank0Mem);
-    opA = opB - Bank0Mem - ~oldCarry;
+    opA = opB - Bank0Mem - zext(!C_flag);
     build UnpackSR_opA;
     setResultFlags(opA);
+    setSubtractCarryFlags(opB, Bank0Mem);
 }
 :^Bank0Mem = opB - opA, "carry" is (op0=3 & op1=4 & opN=3 & opA & opB) ; Bank0Mem {
-    local oldCarry = zext(C_flag);
-    setSubtractCarryFlags(opB, opA);
-    Bank0Mem = opB - opA - ~oldCarry;
+    Bank0Mem = opB - opA - zext(!C_flag);
     setResultFlags(Bank0Mem);
+    setSubtractCarryFlags(opB, opA);
 }
 # cmp r2, 0x1234
 :cmp opB, imm16 is (op0=4 & op1=4 & opN=1 & opA & opB) ; imm16 {
-    setSubtractCarryFlags(opB, imm16);
     local res = opB - imm16;
     setResultFlags(res);
+    setSubtractCarryFlags(opB, imm16);
 }
 :cmp opB, Bank0Mem is (op0=4 & op1=4 & opN=2 & opA & opB) ; Bank0Mem {
-    setSubtractCarryFlags(opB, Bank0Mem);
     local res = opB - Bank0Mem;
     setResultFlags(res);
+    setSubtractCarryFlags(opB, Bank0Mem);
 }
 # r1 = -0x1234
 :^opA = -imm16 is (op0=6 & op1=4 & opN=1 & opA & UnpackSR_opA) ; imm16 {
