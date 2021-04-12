@@ -1326,7 +1326,13 @@ with : op0=0xe & opE1=2 & opBitFlg=1 {
 call_addr: addr is opimm & op1=1 & op0=0xf; imm16 [ addr=(opimm << 16) | imm16; ] { export *[ram]:3 addr; }
 
 :call call_addr is call_addr {
-    push(inst_next);
+    # inst_next is in ConstantSpace, which has fixed word size 1
+    # This causes all of our addresses to be doubled and generates invalid
+    # references to an address, so we need to convert the address before
+    # pushing to stack.
+    local inst_next_real:3 = inst_next >> 1;
+    push(inst_next_real:2);
+    sr[0, 6] = inst_next_real[16, 6];
     push(sr);
 
     call call_addr;
