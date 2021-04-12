@@ -1,0 +1,17 @@
+<patternlist>
+    <pattern>
+        <data>0x88da 01...... 0x20 0x080b0100</data>
+        <!-- push bp,bp to [sp]
+             sp -= *
+             bp = sp + 1
+         -->
+        <funcstart/>
+    </pattern>
+    <pattern>
+        <data>0x88da 0x080b0100</data>
+        <!-- push bp,bp to [sp]
+             bp = sp + 1
+         -->
+        <funcstart/>
+    </pattern>
+</patternlist>
