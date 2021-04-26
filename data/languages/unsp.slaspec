@@ -68,6 +68,8 @@ define token instr(16)
     opA_nosr=(9, 11)
     opA_v=(9, 11)
     opA_p=(9, 11)
+        opA_9=(9, 9)
+        opA_10=(10, 10)
     
     op1=(6, 8)
     opN=(3, 5)
