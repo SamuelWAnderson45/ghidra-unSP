@@ -969,6 +969,49 @@ with : opA_v!=7 {
     }
 }
 
+StackOpA16: ""[imm16] is imm16 {
+    export *:2 imm16;
+}
+
+DataOpA16: "ds:"[imm16] is imm16 {
+    local addr:3 = segment(ds, imm16:2);
+    export *:2 addr;
+}
+
+# Memory BITOP A16, u'nSP 2.0
+:tstb StackOpA16, opBitN is opA_9=1 & opA_10=0 & op1=1 & opBitFn=0 & opBitN ; StackOpA16 {
+    local mask = 1 << opBitN;
+    Z_flag = (StackOpA16 & mask) == 0;
+}
+:tstb DataOpA16, opBitN is opA_9=1 & opA_10=1 & op1=1 & opBitFn=0 & opBitN ; DataOpA16 {
+    local mask = 1 << opBitN;
+    Z_flag = (DataOpA16 & mask) == 0;
+}
+:setb StackOpA16, opBitN is opA_9=1 & opA_10=0 & op1=1 & opBitFn=1 & opBitN ; StackOpA16 {
+    local mask = 1 << opBitN;
+    StackOpA16 = StackOpA16 | mask;
+}
+:setb DataOpA16, opBitN is opA_9=1 & opA_10=1 & op1=1 & opBitFn=1 & opBitN ; DataOpA16 {
+    local mask = 1 << opBitN;
+    DataOpA16 = DataOpA16 | mask;
+}
+:clrb StackOpA16, opBitN is opA_9=1 & opA_10=0 & op1=1 & opBitFn=2 & opBitN ; StackOpA16 {
+    local mask = 1 << opBitN;
+    StackOpA16 = StackOpA16 & ~mask;
+}
+:clrb DataOpA16, opBitN is opA_9=1 & opA_10=1 & op1=1 & opBitFn=2 & opBitN ; DataOpA16 {
+    local mask = 1 << opBitN;
+    DataOpA16 = DataOpA16 & ~mask;
+}
+:invb StackOpA16, opBitN is opA_9=1 & opA_10=0 & op1=1 & opBitFn=3 & opBitN ; StackOpA16 {
+    local mask = 1 << opBitN;
+    StackOpA16 = StackOpA16 ^ mask;
+}
+:invb DataOpA16, opBitN is opA_9=1 & opA_10=1 & op1=1 & opBitFn=3 & opBitN ; DataOpA16 {
+    local mask = 1 << opBitN;
+    DataOpA16 = DataOpA16 ^ mask;
+}
+
 Bank0Mem: ""[imm16] is imm16 { export *:2 imm16; }
 
 # ALU16
