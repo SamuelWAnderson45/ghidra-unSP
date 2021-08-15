@@ -33,13 +33,13 @@
           <register name="r1"/>
         </pentry>
         <pentry minsize="3" maxsize="4">
-          <addr space="join" piece1="r1" piece2="r2"/>
+          <addr space="join" piece1="r2" piece2="r1"/>
         </pentry>
         <pentry minsize="5" maxsize="6">
-          <addr space="join" piece1="r1" piece2="r2" piece3="r3"/>
+          <addr space="join" piece1="r3" piece2="r2" piece3="r1"/>
         </pentry>
         <pentry minsize="7" maxsize="8">
-          <addr space="join" piece1="r1" piece2="r2" piece3="r3" piece4="r4"/>
+          <addr space="join" piece1="r4" piece2="r3" piece3="r2" piece4="r1"/>
         </pentry>
       </output>
       <unaffected>
