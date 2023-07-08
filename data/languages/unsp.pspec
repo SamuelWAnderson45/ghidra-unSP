@@ -2,15 +2,18 @@
 
 <processor_spec>
   <!--Is pc right?-->
-  <programcounter register="pc"/>
+  <programcounter register="pc_full"/>
   <segmentop space="ram" userop="segment" farpointer="yes">
     <pcode>
-      <input name="inner" size="2"/>
       <input name="base" size="1"/>
+      <input name="inner" size="2"/>
       <output name="res" size="3"/>
       <body><![CDATA[
         res = (zext(base) << 16) + zext(inner);
       ]]></body>
     </pcode>
+    <constresolve>
+      <register name="ds"/>
+    </constresolve>
   </segmentop>
 </processor_spec>

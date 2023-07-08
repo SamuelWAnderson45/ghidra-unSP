@@ -9,7 +9,7 @@
             slafile="unsp.sla"
             processorspec="unsp.pspec"
             id="unsp:LE:16:default">
-    <description>Sunplus unSP</description>
+    <description>SunPlus/GeneralPlus &#181;&#39;nSP</description>
     <compiler name="default" spec="unsp.cspec" id="default"/>
   </language>
 </language_definitions>

@@ -19,10 +19,10 @@
   </global>
   <stackpointer register="sp" space="ram" growth="negative"/>
   <returnaddress>
-    <varnode space="stack" offset="0" size="2"/>
+    <varnode space="stack" offset="4" size="2"/>
   </returnaddress>
   <default_proto>
-    <prototype name="__cdecl" extrapop="0" stackshift="-4">
+    <prototype name="__cdecl" extrapop="2" stackshift="2">
       <input>
         <pentry minsize="1" maxsize="256" align="2">
           <addr offset="6" space="stack"/>
@@ -33,18 +33,20 @@
           <register name="r1"/>
         </pentry>
         <pentry minsize="3" maxsize="4">
-          <addr space="join" piece1="r1" piece2="r2"/>
+          <addr space="join" piece1="r2" piece2="r1"/>
         </pentry>
         <pentry minsize="5" maxsize="6">
-          <addr space="join" piece1="r1" piece2="r2" piece3="r3"/>
+          <addr space="join" piece1="r3" piece2="r2" piece3="r1"/>
         </pentry>
         <pentry minsize="7" maxsize="8">
-          <addr space="join" piece1="r1" piece2="r2" piece3="r3" piece4="r4"/>
+          <addr space="join" piece1="r4" piece2="r3" piece3="r2" piece4="r1"/>
         </pentry>
       </output>
       <unaffected>
+        <varnode space="ram" offset="0" size="4"/>
         <register name="sp"/>
         <register name="bp"/>
+        <register name="sr"/>
       </unaffected>
     </prototype>
   </default_proto>
