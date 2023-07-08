@@ -1,1 +1,8 @@
 *.sla
+.antProperties.xml
+.classpath
+.project
+bin/
+.gradle/
+build/
+dist/

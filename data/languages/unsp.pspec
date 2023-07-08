@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
+<!-- See Relax specification: Ghidra/Framework/SoftwareModeling/data/languages/processor_spec.rxg -->
+
 <processor_spec>
   <!--Is pc right?-->
   <programcounter register="pc_full"/>
@@ -16,4 +18,5 @@
       <register name="ds"/>
     </constresolve>
   </segmentop>
+  <!---TODO <default_symbols>-->
 </processor_spec>

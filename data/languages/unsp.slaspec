@@ -32,6 +32,7 @@ define register offset=0x10 size=1   [ C_flag S_flag Z_flag N_flag ds ];
 # Use pc_full as actual program counter, and pc for pushing to stack
 # Separate them from sr so Ghidra advancing instruction pointer does not affect
 # value of other things
+# TODO this comment is now misleading due to the new implementation, revise
 define register offset=0x15 size=3    [ pc_full ];
 define register offset=0x15 size=2    [ pc ];
 define register offset=0x17 size=1    [ cs ];
