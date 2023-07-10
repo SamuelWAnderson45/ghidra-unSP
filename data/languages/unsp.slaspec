@@ -19,20 +19,17 @@ define register offset=0xc size=2    [ sr ];
 
 # Status register components
 # Store these discretely, modelling after the ARM SLEIGH spec
+# S: Sign flag
 define register offset=0x10 size=1   [ C_flag S_flag Z_flag N_flag ds ];
 
 # Program counter
-# In reality, there is no pc_full, only pc and cs, which is the upper 6 bits of the address
-# The call instruction is cross-bank, as are goto's
-# And the program counter will naturally cross banks i.e. 0x4ffff + 1 -> 0x50000
-# In order for calls and gotos to work correctly, we use this fake register. Unfortunately,
-# this makes contents of cs incorrect.
+# In reality, there is no pc_full, only pc and cs. cs is the upper 6 bits of the address
+# and is part of the sr register.
+# But for Ghidra to correctly understand the address space, we create a dummy pc_full register.
+# This requires creating a fake cs register separate from sr. Unfortunately,
+# this makes contents of cs in sr incorrect, so we update sr whenever it is accessed.
 # Until Sleigh adds composite registers (or we find a better solution) this will remain.
-# ---
-# Use pc_full as actual program counter, and pc for pushing to stack
-# Separate them from sr so Ghidra advancing instruction pointer does not affect
-# value of other things
-# TODO this comment is now misleading due to the new implementation, revise
+# In unSP 1.1 and up, the program counter will naturally cross banks i.e. 0x4ffff + 1 -> 0x50000
 define register offset=0x15 size=3    [ pc_full ];
 define register offset=0x15 size=2    [ pc ];
 define register offset=0x17 size=1    [ cs ];
